@@ -172,3 +172,5 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+notebooks/last_model.pth
+experiments/notebooks/classical/best_model.pth
