@@ -1,0 +1,11 @@
+Quantum generated features shape (HybridEmbeddingsForBreastCancerDetection/embeddings/quantum)
+
+features.npy: shape (546, 196)
+features.csv: shape (545, 197)
+labels.npy: shape (546, 1)
+
+Classical features shape (HybridEmbeddingsForBreastCancerDetection/embeddings/classical)
+
+features.npy: shape (546, 512)
+features.csv: shape (545, 513)
+labels.npy: shape (546, 1)
