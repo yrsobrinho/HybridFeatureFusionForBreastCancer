@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -97,17 +98,11 @@ class QuantumModel(nn.Module):
 
             print(f"\nEpoch {epoch + 1}/{epochs} [Quantum Model Training]")
             for images, labels in tqdm(dataloader, desc="Training Batches", leave=False):
-                print('1')
                 images, labels = images.squeeze(1).to(device), labels.squeeze().to(device)
-                print('2')
                 optimizer.zero_grad()
-                print('3')
                 outputs = self(images)
-                print('4')
                 loss = criterion(outputs, labels)
-                print('5')
                 loss.backward()
-                print('6')
                 optimizer.step()
                 total_loss += loss.item()
 
@@ -128,11 +123,8 @@ class QuantumModel(nn.Module):
         with torch.no_grad():
             for images, labels in tqdm(dataloader, desc="Validation Batches", leave=False):
                 images, labels = images.squeeze(1).to(device), labels.squeeze().to(device)
-                print("1")
                 outputs = self(images)
-                print("2")
                 loss = criterion(outputs, labels)
-                print("3")
                 total_loss += loss.item()
 
                 all_labels.extend(labels.cpu().numpy())
@@ -196,12 +188,28 @@ class QuantumModel(nn.Module):
         print(f"Test Loss: {total_loss / len(dataloader):.4f}")
         print(f"Accuracy: {accuracy:.4f}, Precision: {precision:.4f}, Recall: {recall:.4f}, F1 Score: {f1:.4f}, AUC: {auc:.4f}")
 
-    def extract_features(self, dataloader, device):
-        self.eval()
-        features_list = []
+
+    def extract_features_quantum(model, dataloader, dataset_name, output_dir, device):
+        os.makedirs(output_dir, exist_ok=True)
+
+        features_list, labels_list = [], []
+
+        model.eval()
         with torch.no_grad():
-            for images, _ in dataloader:
+            for images, labels in tqdm(dataloader, desc=f"Extracting Quantum Features ({dataset_name})"):
                 images = images.to(device)
-                features = self(images)
+
+                # Extract features using the quantum model
+                features = model(images)
                 features_list.append(features.cpu().numpy())
-        return np.concatenate(features_list, axis=0)
+                labels_list.append(labels.cpu().numpy())
+
+        # Concatenate all features and labels
+        features_array = np.concatenate(features_list, axis=0)
+        labels_array = np.concatenate(labels_list, axis=0)
+
+        # Save features and labels as .npy files
+        np.save(os.path.join(output_dir, f"{dataset_name}_features.npy"), features_array)
+        np.save(os.path.join(output_dir, f"{dataset_name}_labels.npy"), labels_array)
+
+        print(f"{dataset_name} quantum features saved in {output_dir}.")
