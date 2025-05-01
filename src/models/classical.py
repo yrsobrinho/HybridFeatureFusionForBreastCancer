@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torchvision.models as models
+from torchvision.models import ResNet18_Weights
 import numpy as np
 from tqdm import tqdm
 import datetime
@@ -9,7 +10,7 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 class ClassicalModel(nn.Module):
     def __init__(self, num_classes):
         super(ClassicalModel, self).__init__()
-        self.resnet = models.resnet18(pretrained=True)
+        self.resnet = models.resnet18(weights=ResNet18_Weights.DEFAULT)
         self.resnet.fc = nn.Linear(self.resnet.fc.in_features, num_classes)
         
     def forward(self, x):
