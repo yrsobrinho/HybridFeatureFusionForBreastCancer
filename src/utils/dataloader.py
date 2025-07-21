@@ -9,7 +9,7 @@ from medmnist.dataset import BreastMNIST
 import numpy as np
 
 class BreastMNISTLoader:
-    def __init__(self, batch_size=128, image_size=28):
+    def __init__(self, batch_size=128, image_size=128):
         self.batch_size = batch_size
         self.image_size = image_size
         self.info = INFO['breastmnist']

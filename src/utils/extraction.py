@@ -1,62 +1,37 @@
 import os
 import numpy as np
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from tqdm import tqdm
 
-class FeatureExtractor:
-    def __init__(self, model, device=None):
-        self.model = model
-        self.device = device or next(model.parameters()).device
-        self.model.to(self.device)
+class QuantumFeatureExtractor(nn.Module):
+    def __init__(self, quantum_model, output_size=(25, 25), patch_size=4, n_qubits=4):
+        super(QuantumFeatureExtractor, self).__init__()
+        self.quantum_model = quantum_model 
+        self.output_size = output_size
+        self.patch_size = patch_size
+        self.n_qubits = n_qubits
 
-    def extract_features_quantum(self, model, dataloader, dataset_name, output_dir, device):
-        os.makedirs(output_dir, exist_ok=True)
+        self.circuit = self.quantum_model.define_circuit()
+        self.flatten = nn.Flatten()
 
-        features_list, labels_list = [], []
+    def forward(self, x):
+        x = x.permute(0, 2, 3, 1)  
+        x = self.quantum_model.quanvolution_batch(x) 
+        x = torch.relu(x)
+        x = self.flatten(x)
+        return x
 
-        model.eval()
-        with torch.no_grad():
-            for images, labels in tqdm(dataloader, desc=f"Extracting Quantum Features ({dataset_name})"):
-                images = images.to(device)
-
-                # Extract features using the quantum model
-                features = model(images)
-                features_list.append(features.cpu().numpy())
-                labels_list.append(labels.cpu().numpy())
-
-        # Concatenate all features and labels
-        features_array = np.concatenate(features_list, axis=0)
-        labels_array = np.concatenate(labels_list, axis=0)
-
-        # Save features and labels as .npy files
-        np.save(os.path.join(output_dir, f"{dataset_name}_features.npy"), features_array)
-        np.save(os.path.join(output_dir, f"{dataset_name}_labels.npy"), labels_array)
-
-        print(f"{dataset_name} quantum features saved in {output_dir}.")
-
-    def extract_features_classical(self, model, dataloader, dataset_name, output_dir, device):
-        os.makedirs(output_dir, exist_ok=True)
-
-        features_list, labels_list = [], []
-
-        model.eval()
-        with torch.no_grad():
-            for images, labels in tqdm(dataloader, desc=f"Extracting Features ({dataset_name})"):
-                images = images.to(device)
-
-                # Extract features using the classical model
-                features = model(images)
-                features = features.view(features.size(0), -1)  # Flatten the features
-
-                features_list.append(features.cpu().numpy())
-                labels_list.append(labels.cpu().numpy())
-
-        # Concatenate all features and labels
-        features_array = np.concatenate(features_list, axis=0)
-        labels_array = np.concatenate(labels_list, axis=0)
-
-        # Save features and labels as .npy files
-        np.save(os.path.join(output_dir, f"{dataset_name}_features.npy"), features_array)
-        np.save(os.path.join(output_dir, f"{dataset_name}_labels.npy"), labels_array)
-
-        print(f"{dataset_name} classical features saved in {output_dir}.")
+class ClassicalFeatureExtractor(nn.Module):
+    def __init__(self, original_model):
+        super().__init__()
+        self.resnet = original_model.resnet
+        self.features = nn.Sequential(*list(self.resnet.children())[:-1])
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((1, 1))
+        
+    def forward(self, x):
+        x = self.features(x)
+        x = self.adaptive_pool(x)
+        x = torch.flatten(x, 1)
+        return x

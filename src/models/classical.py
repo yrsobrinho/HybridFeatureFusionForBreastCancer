@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torchvision.models as models
-from torchvision.models import ResNet18_Weights
 import numpy as np
 from tqdm import tqdm
 import datetime
@@ -10,7 +9,7 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 class ClassicalModel(nn.Module):
     def __init__(self, num_classes):
         super(ClassicalModel, self).__init__()
-        self.resnet = models.resnet18(weights=ResNet18_Weights.DEFAULT)
+        self.resnet = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
         self.resnet.fc = nn.Linear(self.resnet.fc.in_features, num_classes)
         
     def forward(self, x):
@@ -121,3 +120,17 @@ class ClassicalModel(nn.Module):
                 output = self.resnet[:-1](inputs)  
                 features.append(output.cpu().numpy())
         return np.concatenate(features, axis=0)
+    
+class ClassicalFeatureExtractor(nn.Module):
+    def __init__(self, original_model):
+        super().__init__()
+        self.resnet = original_model.resnet
+        # Remove the final classification layer and get features from avgpool
+        self.features = nn.Sequential(*list(self.resnet.children())[:-1])
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((1, 1))
+        
+    def forward(self, x):
+        x = self.features(x)
+        x = self.adaptive_pool(x)
+        x = torch.flatten(x, 1)
+        return x

@@ -1,0 +1,26 @@
+{
+  "common": {
+    "epochs_phase1": 20,
+    "epochs_phase2": 10,
+    "batch_size": 256,
+    "num_classes": 2,
+    "attention_dim": 128,
+    "temperature": 1.0,
+    "alpha": 0.2,
+    "alpha_max": 0.9,
+    "alpha_min": 0.1,
+    "beta": 0.1,
+    "fusion_method": "concat"
+  },
+  "quantum": {
+    "n_qubits": 4,
+    "n_layers": 1,
+    "learning_rate": 1e-4
+  },
+  "classical": {
+    "learning_rate": 1e-4
+  },
+  "fusion": {
+    "learning_rate": 1e-3
+  }
+}
