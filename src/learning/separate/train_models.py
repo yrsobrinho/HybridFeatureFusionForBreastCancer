@@ -57,31 +57,39 @@ def main():
 
     # Train Quantum Model
     quantum_model = QuantumModel(
-        quantum_hyperparams["n_qubits"], 
-        quantum_hyperparams["n_layers"], 
+        quantum_hyperparams["n_qubits"],
+        quantum_hyperparams["n_layers"],
         common_hyperparams["num_classes"]
     ).to(device)
 
-    # Initialize quantum parameters and optimizer
-    params_q = quantum_model.params_q  # Use the params_q attribute from the QuantumModel
+    print(f"Total trainable parameters: {count_parameters(quantum_model)}")
 
-    # Train quantum and classical components
-    params_q, opt_state_q = quantum_model.train_model( 
-        dataloader["train"], 
-        criterion, 
-        torch.optim.Adam(quantum_model.parameters(), lr=quantum_hyperparams["learning_rate"]),
-        params_q, 
-        opt_state_q, 
-        device, 
+    # --- Optimizer ---
+    optimizer = optim.Adam(
+        quantum_model.parameters(),
+        lr=quantum_hyperparams["learning_rate"]
+    )
+
+    # --- Train ---
+    params_q, opt_state_q = quantum_model.train_model(
+        dataloader["train"],
+        criterion,
+        optimizer,
+        params_q,
+        opt_state_q,
+        device,
         common_hyperparams["epochs"]
     )
 
-    # Validate the quantum model
+    # --- Validate ---
     quantum_model.validate_model(
         dataloader["val"], criterion, device, params_q
     )
 
-    # Save the best quantum model
-    torch.save(quantum_model.state_dict(), os.path.join(directories["quantum_model_dir"], "best_quantum_model.pth"))
+    # --- Save model ---
+    model_path = os.path.join(directories["quantum_model_dir"], "best_quantum_model.pth")
+    torch.save(quantum_model.state_dict(), model_path)
+    print(f"Best model saved at {model_path}")
+
 if __name__ == "__main__":
     main()

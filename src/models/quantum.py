@@ -6,91 +6,137 @@ import datetime
 from tqdm import tqdm
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 
+import torch
+import torch.nn as nn
+import pennylane as qml
+
+
 class QuanvLayer(nn.Module):
-    def __init__(self, n_qubits=4, n_layers=1, patch_size=4):
+    def __init__(self, n_qubits=4, n_layers=1, patch_size=4, mode="both"):
+        """
+        mode: "horizontal", "vertical" ou "both"
+        """
         super().__init__()
         self.n_qubits = n_qubits
         self.n_layers = n_layers
         self.patch_size = patch_size
+        self.mode = mode
 
+        # Dispositivo quântico
         self.dev = qml.device("lightning.gpu", wires=n_qubits)
 
-        # Define variational circuit
+        # Circuito variacional
         def circuit(inputs, weights):
-            # inputs: vetor de dimensão n_qubits
             qml.AngleEmbedding(inputs, wires=range(n_qubits), rotation="Y")
             qml.StronglyEntanglingLayers(weights, wires=range(n_qubits))
             return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
 
-        # Torch-compatible QNode + TorchLayer
         weight_shapes = {"weights": (n_layers, n_qubits, 3)}
         self.qnode = qml.QNode(circuit, self.dev, interface="torch", diff_method="adjoint")
         self.qlayer = qml.qnn.TorchLayer(self.qnode, weight_shapes)
 
-    def forward(self, x):
+    def quanv1d_horizontal(self, x):
         """
-        Aplica quanvolução: divide em patches e aplica o circuito quântico em cada patch.
-        x: [B, C, H, W]
-        retorna: [B, n_qubits, H//patch_size, W//patch_size]
+        Aplica patches horizontais de tamanho patch_size.
+        Entrada: [B, 1, H, W]
+        Saída:   [B, n_qubits, H, W//patch_size]
         """
-        B, H, W = x.shape  
-
-        patches_out = []
-
-        out_h = H // self.patch_size
+        B, C, H, W = x.shape
         out_w = W // self.patch_size
+        outputs = []
 
-        for i in range(0, H, self.patch_size):
+        for i in range(H):  # linha a linha
+            row = x[:, 0, i, :]              # [B, W]
+            patches = []
             for j in range(0, W, self.patch_size):
-                patch = x[:, :, i:i+self.patch_size, j:j+self.patch_size]  # [B, C, p, p]
-                patch = patch.reshape(B, -1)  # Flatten patch -> [B, C*p*p]
+                patch = row[:, j:j+self.patch_size]  # [B, patch_size]
+                if patch.shape[1] != self.n_qubits:
+                    continue
+                q_out = self.qlayer(patch)           # [B, n_qubits]
+                patches.append(q_out)
+            patches = torch.stack(patches, dim=2)    # [B, n_qubits, out_w]
+            outputs.append(patches)
 
-                # Ajusta para número de qubits (trunc/pad)
-                if patch.shape[1] > self.n_qubits:
-                    patch = patch[:, :self.n_qubits]
-                elif patch.shape[1] < self.n_qubits:
-                    pad = torch.zeros(B, self.n_qubits - patch.shape[1], device=x.device, dtype=patch.dtype)
-                    patch = torch.cat([patch, pad], dim=1)
+        outputs = torch.stack(outputs, dim=2)        # [B, n_qubits, H, out_w]
+        return outputs
 
-                # Passa patch pelo circuito (TorchLayer vai expor parâmetros treináveis)
-                q_out = self.qlayer(patch)  # [B, n_qubits]
-                patches_out.append(q_out)
+    def quanv1d_vertical(self, x):
+        """
+        Aplica patches verticais de tamanho patch_size.
+        Entrada: [B, 1, H, W]
+        Saída:   [B, n_qubits, H//patch_size, W]
+        """
+        B, C, H, W = x.shape
+        out_h = H // self.patch_size
+        outputs = []
 
-        # Reorganiza em feature map
-        # patches_out: lista com out_h*out_w elementos, cada um [B, n_qubits]
-        patches_out = torch.stack(patches_out, dim=1)  # [B, num_patches, n_qubits]
-        patches_out = patches_out.reshape(B, out_h, out_w, self.n_qubits)  # [B, out_h, out_w, n_qubits]
+        for j in range(W):  # coluna a coluna
+            col = x[:, 0, :, j]              # [B, H]
+            patches = []
+            for i in range(0, H, self.patch_size):
+                patch = col[:, i:i+self.patch_size]  # [B, patch_size]
+                if patch.shape[1] != self.n_qubits:
+                    continue
+                q_out = self.qlayer(patch)           # [B, n_qubits]
+                patches.append(q_out)
+            patches = torch.stack(patches, dim=2)    # [B, n_qubits, out_h]
+            outputs.append(patches)
 
-        # Retorna no formato [B, n_qubits, out_h, out_w]
-        return patches_out.permute(0, 3, 1, 2)
+        outputs = torch.stack(outputs, dim=3)        # [B, n_qubits, out_h, W]
+        return outputs
+
+    def forward(self, x):
+        if self.mode == "horizontal":
+            return self.quanv1d_horizontal(x)
+        elif self.mode == "vertical":
+            return self.quanv1d_vertical(x)
+        elif self.mode == "both":
+            h_out = self.quanv1d_horizontal(x)
+            v_out = self.quanv1d_vertical(x)
+            return torch.cat([h_out, v_out], dim=1)
+        else:
+            raise ValueError(f"Modo inválido: {self.mode}")
 
 
-# ======================
-# Quantum + Classical Hybrid Model
-# ======================
 class QuantumModel(nn.Module):
-    def __init__(self, n_qubits=4, n_layers=1, num_classes=2, patch_size=4, input_size=28, in_channels=1):
+    def __init__(self, n_qubits=4, n_layers=1, num_classes=2,
+                 patch_size=4, input_size=28, in_channels=1, mode="horizontal"):
         super().__init__()
-        self.quanv = QuanvLayer(n_qubits=n_qubits, n_layers=n_layers, patch_size=patch_size)
+        self.quanv = QuanvLayer(
+            n_qubits=n_qubits,
+            n_layers=n_layers,
+            patch_size=patch_size,
+            mode=mode
+        )
         self.patch_size = patch_size
         self.n_qubits = n_qubits
+        self.mode = mode
 
-        # calcula tamanho de feature assumindo entrada quadrada input_size x input_size
-        out_h = input_size // patch_size
-        out_w = input_size // patch_size
-        feat_size = out_h * out_w * n_qubits
+        # calcula tamanho do feature map
+        if mode == "horizontal":
+            out_h = input_size
+            out_w = input_size // patch_size
+            feat_size = out_h * out_w * n_qubits
+        elif mode == "vertical":
+            out_h = input_size // patch_size
+            out_w = input_size
+            feat_size = out_h * out_w * n_qubits
+        elif mode == "both":
+            # concatenação das duas saídas
+            feat_size = (input_size * (input_size // patch_size) +
+                         (input_size // patch_size) * input_size) * n_qubits
+        else:
+            raise ValueError(f"Modo inválido: {mode}")
 
         self.fc1 = nn.Linear(feat_size, 64)
         self.fc2 = nn.Linear(64, num_classes)
 
     def forward(self, x):
-        # x: [B, C, H, W]
-        x = self.quanv(x)            # [B, n_qubits, out_h, out_w]
-        x = x.flatten(start_dim=1)   # [B, feat_size]
+        x = self.quanv(x)            # saída da quanv
+        x = x.flatten(start_dim=1)   # flatten para FC
         x = F.relu(self.fc1(x))
         x = self.fc2(x)
         return F.log_softmax(x, dim=1)
-
 
 # ======================
 # Training / Validation / Testing
