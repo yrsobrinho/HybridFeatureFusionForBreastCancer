@@ -12,20 +12,15 @@ import pennylane as qml
 
 
 class QuanvLayer(nn.Module):
-    def __init__(self, n_qubits=4, n_layers=1, patch_size=4, mode="both"):
-        """
-        mode: "horizontal", "vertical" ou "both"
-        """
+    def __init__(self, n_qubits, n_layers, patch_size, mode="both"):
         super().__init__()
         self.n_qubits = n_qubits
         self.n_layers = n_layers
         self.patch_size = patch_size
         self.mode = mode
 
-        # Dispositivo quântico
         self.dev = qml.device("lightning.gpu", wires=n_qubits)
 
-        # Circuito variacional
         def circuit(inputs, weights):
             qml.AngleEmbedding(inputs, wires=range(n_qubits), rotation="Y")
             qml.StronglyEntanglingLayers(weights, wires=range(n_qubits))
@@ -36,16 +31,11 @@ class QuanvLayer(nn.Module):
         self.qlayer = qml.qnn.TorchLayer(self.qnode, weight_shapes)
 
     def quanv1d_horizontal(self, x):
-        """
-        Aplica patches horizontais de tamanho patch_size.
-        Entrada: [B, 1, H, W]
-        Saída:   [B, n_qubits, H, W//patch_size]
-        """
         B, C, H, W = x.shape
         out_w = W // self.patch_size
         outputs = []
 
-        for i in range(H):  # linha a linha
+        for i in range(H): 
             row = x[:, 0, i, :]              # [B, W]
             patches = []
             for j in range(0, W, self.patch_size):
@@ -61,16 +51,11 @@ class QuanvLayer(nn.Module):
         return outputs
 
     def quanv1d_vertical(self, x):
-        """
-        Aplica patches verticais de tamanho patch_size.
-        Entrada: [B, 1, H, W]
-        Saída:   [B, n_qubits, H//patch_size, W]
-        """
         B, C, H, W = x.shape
         out_h = H // self.patch_size
         outputs = []
 
-        for j in range(W):  # coluna a coluna
+        for j in range(W): 
             col = x[:, 0, :, j]              # [B, H]
             patches = []
             for i in range(0, H, self.patch_size):
@@ -84,6 +69,17 @@ class QuanvLayer(nn.Module):
 
         outputs = torch.stack(outputs, dim=3)        # [B, n_qubits, out_h, W]
         return outputs
+    
+    def aggregate_sobel(self, h_out, v_out, method):
+        if method == "euclidean":
+            v_out_transposed = v_out.transpose(2, 3)
+            return torch.sqrt(h_out**2 + v_out_transposed**2)
+        elif method == "sum":
+            return h_out + v_out
+        elif method == "abs_sum":
+            return torch.abs(h_out) + torch.abs(v_out)
+        else:
+            raise ValueError(f"Invalid aggregation method: {method}")
 
     def forward(self, x):
         if self.mode == "horizontal":
@@ -91,16 +87,19 @@ class QuanvLayer(nn.Module):
         elif self.mode == "vertical":
             return self.quanv1d_vertical(x)
         elif self.mode == "both":
+            print("Beginning horizontal processing...")
             h_out = self.quanv1d_horizontal(x)
+            print("Beginning vertical processing...")
             v_out = self.quanv1d_vertical(x)
-            return torch.cat([h_out, v_out], dim=1)
+            print("Aggregation...")
+            return self.aggregate_sobel(h_out, v_out, method="euclidean") 
         else:
-            raise ValueError(f"Modo inválido: {self.mode}")
+            raise ValueError(f"Invalid mode: {self.mode}")
 
 
 class QuantumModel(nn.Module):
-    def __init__(self, n_qubits=4, n_layers=1, num_classes=2,
-                 patch_size=4, input_size=28, in_channels=1, mode="horizontal"):
+    def __init__(self, n_qubits, n_layers, num_classes,
+                 patch_size, input_size, mode="horizontal"):
         super().__init__()
         self.quanv = QuanvLayer(
             n_qubits=n_qubits,
@@ -108,39 +107,27 @@ class QuantumModel(nn.Module):
             patch_size=patch_size,
             mode=mode
         )
+
         self.patch_size = patch_size
         self.n_qubits = n_qubits
         self.mode = mode
-
-        # calcula tamanho do feature map
-        if mode == "horizontal":
-            out_h = input_size
-            out_w = input_size // patch_size
-            feat_size = out_h * out_w * n_qubits
-        elif mode == "vertical":
-            out_h = input_size // patch_size
-            out_w = input_size
-            feat_size = out_h * out_w * n_qubits
-        elif mode == "both":
-            # concatenação das duas saídas
-            feat_size = (input_size * (input_size // patch_size) +
-                         (input_size // patch_size) * input_size) * n_qubits
-        else:
-            raise ValueError(f"Modo inválido: {mode}")
+      
+        dummy_input = torch.zeros(1, 1, input_size, input_size)  
+        dummy_out = self.quanv(dummy_input)
+        feat_size = dummy_out.numel() // dummy_out.shape[0]      
 
         self.fc1 = nn.Linear(feat_size, 64)
         self.fc2 = nn.Linear(64, num_classes)
 
     def forward(self, x):
-        x = self.quanv(x)            # saída da quanv
-        x = x.flatten(start_dim=1)   # flatten para FC
+        print("Passing through quanvolution layer...")
+        x = self.quanv(x)       
+        print("Quanvolution output shape:", x.shape)    
+        x = x.flatten(start_dim=1)   
         x = F.relu(self.fc1(x))
         x = self.fc2(x)
         return F.log_softmax(x, dim=1)
 
-# ======================
-# Training / Validation / Testing
-# ======================
 def train_model(model, train_loader, criterion, optimizer, device, num_epochs=10, log_interval=50):
     model.to(device)
     history = {"train_loss": [], "train_acc": []}
@@ -157,7 +144,7 @@ def train_model(model, train_loader, criterion, optimizer, device, num_epochs=10
             labels = labels.squeeze().to(device)
 
             optimizer.zero_grad()
-            outputs = model(images)  # forward completo (inclui camadas quânticas)
+            outputs = model(images) 
             loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
@@ -181,7 +168,6 @@ def train_model(model, train_loader, criterion, optimizer, device, num_epochs=10
         print(f"Epoch {epoch+1}: Train Loss={epoch_loss:.4f}, Train Acc={epoch_acc:.4f}")
 
     return history
-
 
 def validate_model(model, dataloader, criterion, device):
     model.eval()
@@ -233,7 +219,6 @@ def test_model(model, dataloader, criterion, device, hyperparams, output_file="t
 
     with torch.no_grad():
         for images, labels in tqdm(dataloader, desc="Testing"):
-            # dependendo do formato do seu dataloader, cheque squeeze
             images = images.to(device)
             labels = labels.squeeze().to(device)
 
@@ -257,7 +242,6 @@ def test_model(model, dataloader, criterion, device, hyperparams, output_file="t
 
     avg_loss = total_loss / len(dataloader)
 
-    # Salva resultados
     with open(output_file, "a") as f:
         f.write(f"\n[Quantum Model Testing - {datetime.datetime.now()}]\n")
         f.write(f"Hyperparameters: {hyperparams}\n")
