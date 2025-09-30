@@ -70,6 +70,10 @@ class QuanvLayer(nn.Module):
         outputs = torch.stack(outputs, dim=3)        # [B, n_qubits, out_h, W]
         return outputs
     
+    def quanv1d_interlaced(self, h_out, v_out):
+        interlaced_tensor = torch.stack((h_out, v_out), dim = 3)
+        return interlaced_tensor
+    
     def aggregate_sobel(self, h_out, v_out, method):
         if method == "euclidean":
             v_out_transposed = v_out.transpose(2, 3)
@@ -80,6 +84,7 @@ class QuanvLayer(nn.Module):
             return torch.abs(h_out) + torch.abs(v_out)
         else:
             raise ValueError(f"Invalid aggregation method: {method}")
+    
 
     def forward(self, x):
         if self.mode == "horizontal":
@@ -93,6 +98,13 @@ class QuanvLayer(nn.Module):
             v_out = self.quanv1d_vertical(x)
             print("Aggregation...")
             return self.aggregate_sobel(h_out, v_out, method="euclidean") 
+        elif self.mode == "interlaced":
+            print("Beginning horizontal processing...")
+            h_out = self.quanv1d_horizontal(x)
+            print("Beginning vertical processing...")
+            v_out = self.quanv1d_vertical(x)
+            print("Interlacing...")
+            return self.quanv1d_interlaced(h_out, v_out)
         else:
             raise ValueError(f"Invalid mode: {self.mode}")
 
