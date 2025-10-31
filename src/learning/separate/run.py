@@ -6,18 +6,11 @@ import torch.optim as optim
 from tqdm import tqdm
 from src.utils.common import count_parameters, setup_device, setup_directories
 from src.utils.dataloader import BreastMNISTLoader
+from src.models.autoencoder import Autoencoder
 from src.models.quantum import QuantumModel, train_model, validate_model, test_model  
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--autoencoder_path",
-        type=str,
-        default="/home/eflammere/HybridEmbeddingsForBreastCancerDetection/experiments/separate/models/autoencoder/autoencoder.pth",
-        help="Path to autoencoder .pth (state_dict) to use as encoder. If not present, pipeline uses raw images."
-    )
-    args = parser.parse_args()
-
+    autoencoder_path = "/home/eflammere/HybridEmbeddingsForBreastCancerDetection/experiments/separate/models/autoencoder/autoencoder.pth"
     device = setup_device()
     directories = setup_directories()
 
@@ -34,21 +27,17 @@ def main():
         "patch_size": 7
     }
 
-    # load dataloaders (raw medmnist images)
     loader = BreastMNISTLoader(batch_size=common_hyperparams["batch_size"], image_size=224)
     train_loader, test_loader, val_loader = loader.get_dataloaders()
     dataloader = {"train": train_loader, "val": val_loader, "test": test_loader}
 
-    # try to load Autoencoder and extract encoder module
-    # import Autoencoder directly (no existence/import tests)
-    from src.models.autoencoder import Autoencoder
     encoder_module = None
-    if args.autoencoder_path:
+    if autoencoder_path:
         try:
             ae = Autoencoder()
         except TypeError:
             ae = Autoencoder(input_channels=1, img_size=28)
-        state = torch.load(args.autoencoder_path, map_location="cpu", weights_only=True)
+        state = torch.load(autoencoder_path, map_location="cpu", weights_only=True)
         state_dict = state.get("state_dict", state)
         try:
             ae.load_state_dict(state_dict)
@@ -59,7 +48,7 @@ def main():
         for p in encoder_module.parameters():
             p.requires_grad = False
         encoder_module.to(device)
-        print(f"[info] Autoencoder carregado de {args.autoencoder_path}")
+        print(f"Autoencoder loaded from {autoencoder_path}")
 
     criterion = nn.CrossEntropyLoss()
     quantum_model = QuantumModel(
@@ -99,7 +88,11 @@ def main():
 
         val_loss, val_acc, val_prec, val_rec, val_f1, val_auc = validation_metrics
 
-        print(f"Results - Train Accuracy: {train_acc:.4f}, Validation Acc: {val_acc:.4f}")
+        print(f"Results - Train Accuracy: {train_acc:.4f}")
+        print(
+            f"Validation - Loss: {val_loss:.4f}, Acc: {val_acc:.4f}, "
+            f"Precision: {val_prec:.4f}, Recall: {val_rec:.4f}, F1: {val_f1:.4f}, AUC: {val_auc:.4f}"
+        )
 
         if val_acc > best_val_acc:
             best_val_acc = val_acc
