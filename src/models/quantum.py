@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -5,10 +6,6 @@ import pennylane as qml
 import datetime
 from tqdm import tqdm
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
-
-import torch
-import torch.nn as nn
-import pennylane as qml
 
 
 class QuanvLayer(nn.Module):
@@ -19,6 +16,7 @@ class QuanvLayer(nn.Module):
         self.patch_size = patch_size
         self.mode = mode
 
+        # device selection may vary on your environment; keep as-is
         self.dev = qml.device("lightning.gpu", wires=n_qubits)
 
         def circuit(inputs, weights):
@@ -32,18 +30,39 @@ class QuanvLayer(nn.Module):
 
     def quanv1d_horizontal(self, x):
         B, C, H, W = x.shape
-        out_w = W // self.patch_size
+        p = self.patch_size
+
+        # pad so H and W are multiples of patch_size
+        pad_w = (p - (W % p)) % p
+        pad_h = (p - (H % p)) % p
+        if pad_w != 0 or pad_h != 0:
+            x = F.pad(x, (0, pad_w, 0, pad_h), mode='constant', value=0.0)
+            B, C, H, W = x.shape
+
+        out_w = W // p
         outputs = []
 
-        for i in range(H): 
+        for i in range(H):
             row = x[:, 0, i, :]              # [B, W]
             patches = []
-            for j in range(0, W, self.patch_size):
-                patch = row[:, j:j+self.patch_size]  # [B, patch_size]
-                if patch.shape[1] != self.n_qubits:
+            for j in range(0, W, p):
+                patch = row[:, j:j+p]        # [B, p]
+                if patch.shape[1] != p:
                     continue
-                q_out = self.qlayer(patch)           # [B, n_qubits]
+                # make patch match n_qubits (trim or pad)
+                patch_in = patch
+                if patch_in.shape[1] != self.n_qubits:
+                    if patch_in.shape[1] >= self.n_qubits:
+                        patch_in = patch_in[:, :self.n_qubits]
+                    else:
+                        pad_size = self.n_qubits - patch_in.shape[1]
+                        pad_tensor = torch.zeros(B, pad_size, device=patch_in.device, dtype=patch_in.dtype)
+                        patch_in = torch.cat([patch_in, pad_tensor], dim=1)
+                q_out = self.qlayer(patch_in)  # [B, n_qubits]
                 patches.append(q_out)
+            if len(patches) == 0:
+                # fallback zeros
+                patches = [torch.zeros(B, self.n_qubits, device=x.device, dtype=x.dtype) for _ in range(out_w)]
             patches = torch.stack(patches, dim=2)    # [B, n_qubits, out_w]
             outputs.append(patches)
 
@@ -52,95 +71,144 @@ class QuanvLayer(nn.Module):
 
     def quanv1d_vertical(self, x):
         B, C, H, W = x.shape
-        out_h = H // self.patch_size
+        p = self.patch_size
+
+        pad_w = (p - (W % p)) % p
+        pad_h = (p - (H % p)) % p
+        if pad_w != 0 or pad_h != 0:
+            x = F.pad(x, (0, pad_w, 0, pad_h), mode='constant', value=0.0)
+            B, C, H, W = x.shape
+
+        out_h = H // p
         outputs = []
 
-        for j in range(W): 
+        for j in range(W):
             col = x[:, 0, :, j]              # [B, H]
             patches = []
-            for i in range(0, H, self.patch_size):
-                patch = col[:, i:i+self.patch_size]  # [B, patch_size]
-                if patch.shape[1] != self.n_qubits:
+            for i in range(0, H, p):
+                patch = col[:, i:i+p]        # [B, p]
+                if patch.shape[1] != p:
                     continue
-                q_out = self.qlayer(patch)           # [B, n_qubits]
+                patch_in = patch
+                if patch_in.shape[1] != self.n_qubits:
+                    if patch_in.shape[1] >= self.n_qubits:
+                        patch_in = patch_in[:, :self.n_qubits]
+                    else:
+                        pad_size = self.n_qubits - patch_in.shape[1]
+                        pad_tensor = torch.zeros(B, pad_size, device=patch_in.device, dtype=patch_in.dtype)
+                        patch_in = torch.cat([patch_in, pad_tensor], dim=1)
+                q_out = self.qlayer(patch_in)  # [B, n_qubits]
                 patches.append(q_out)
+            if len(patches) == 0:
+                patches = [torch.zeros(B, self.n_qubits, device=x.device, dtype=x.dtype) for _ in range(out_h)]
             patches = torch.stack(patches, dim=2)    # [B, n_qubits, out_h]
             outputs.append(patches)
 
         outputs = torch.stack(outputs, dim=3)        # [B, n_qubits, out_h, W]
         return outputs
-    
-    def quanv1d_interlaced(self, h_out, v_out):
-        interlaced_tensor = torch.stack((h_out, v_out), dim = 3)
-        return interlaced_tensor
-    
-    def aggregate_sobel(self, h_out, v_out, method):
-        if method == "euclidean":
-            v_out_transposed = v_out.transpose(2, 3)
-            return torch.sqrt(h_out**2 + v_out_transposed**2)
-        elif method == "sum":
-            return h_out + v_out
-        elif method == "abs_sum":
-            return torch.abs(h_out) + torch.abs(v_out)
-        else:
-            raise ValueError(f"Invalid aggregation method: {method}")
-    
 
     def forward(self, x):
-        if self.mode == "horizontal":
-            return self.quanv1d_horizontal(x)
-        elif self.mode == "vertical":
-            return self.quanv1d_vertical(x)
-        elif self.mode == "both":
-            print("Beginning horizontal processing...")
-            h_out = self.quanv1d_horizontal(x)
-            print("Beginning vertical processing...")
-            v_out = self.quanv1d_vertical(x)
-            print("Aggregation...")
-            return self.aggregate_sobel(h_out, v_out, method="euclidean") 
-        elif self.mode == "interlaced":
-            print("Beginning horizontal processing...")
-            h_out = self.quanv1d_horizontal(x)
-            print("Beginning vertical processing...")
-            v_out = self.quanv1d_vertical(x)
-            print("Interlacing...")
-            return self.quanv1d_interlaced(h_out, v_out)
-        else:
-            raise ValueError(f"Invalid mode: {self.mode}")
-
+        x = self.quanv1d_horizontal(x)
+        print("After horizontal quanv:", x.shape)
+        x = self.quanv1d_vertical(x)
+        print("After vertical quanv:", x.shape)
+        return x
 
 class QuantumModel(nn.Module):
     def __init__(self, n_qubits, n_layers, num_classes,
-                 patch_size, input_size, mode="horizontal"):
+                 patch_size, encoder: nn.Module = None, encoder_output_size: int = None):
+        """
+        encoder_output_size: if provided, resizes encoder output spatial dims to (encoder_output_size, encoder_output_size)
+        """
         super().__init__()
+        self.encoder = encoder
+
         self.quanv = QuanvLayer(
             n_qubits=n_qubits,
             n_layers=n_layers,
             patch_size=patch_size,
-            mode=mode
         )
 
         self.patch_size = patch_size
         self.n_qubits = n_qubits
-        self.mode = mode
-      
-        dummy_input = torch.zeros(1, 1, input_size, input_size)  
-        dummy_out = self.quanv(dummy_input)
-        feat_size = dummy_out.numel() // dummy_out.shape[0]      
+        self.num_classes = num_classes
+        self.encoder_output_size = encoder_output_size
 
-        self.fc1 = nn.Linear(feat_size, 64)
-        self.fc2 = nn.Linear(64, num_classes)
+        self.fc1 = None
+        self.fc2 = None
+
+    def _apply_encoder(self, x):
+        if self.encoder is None:
+            return x
+        enc = None
+
+        if hasattr(self.encoder, "encode"):
+            with torch.no_grad():
+                enc = self.encoder.encode(x)
+        elif hasattr(self.encoder, "encoder"):
+            try:
+                with torch.no_grad():
+                    enc = self.encoder.encoder(x)
+            except Exception:
+                with torch.no_grad():
+                    enc = self.encoder(x)
+        else:
+            with torch.no_grad():
+                out = self.encoder(x)
+            if isinstance(out, (tuple, list)) and len(out) > 1:
+                enc = out[1]
+            else:
+                enc = out
+
+        if enc is None:
+            raise RuntimeError("Encoder returned None")
+
+        enc = enc.detach().float()
+
+        if enc.ndim == 4:
+            enc = enc
+        elif enc.ndim == 3:
+            enc = enc.unsqueeze(1)
+        elif enc.ndim == 2:
+            B, F = enc.shape
+            s = int(math.sqrt(F))
+            if s * s == F:
+                enc = enc.view(B, 1, s, s)
+            else:
+                enc = enc.view(B, 1, 1, F)
+        else:
+            raise RuntimeError(f"Unsupported encoder output ndim={enc.ndim}")
+
+        if self.encoder_output_size is not None:
+            target = self.encoder_output_size
+            _, _, h, w = enc.shape
+            if (h, w) != (target, target):
+                mode = 'bilinear' if h > 1 and w > 1 else 'bilinear'
+                enc = F.interpolate(enc, size=(target, target), mode=mode, align_corners=False)
+        return enc
 
     def forward(self, x):
-        print("Passing through quanvolution layer...")
-        x = self.quanv(x)       
-        print("Quanvolution output shape:", x.shape)    
-        x = x.flatten(start_dim=1)   
+        print("Before encoder:", x.shape)
+        x = self._apply_encoder(x)
+        print("After encoder:", x.shape)
+        if x.shape[1] != 1:
+           x = x.mean(dim=1, keepdim=True)
+        print("Starts Quanvolution, shape:", x.shape)
+        x = self.quanv(x) 
+        print("Finishes Quanvolution, shape:", x.shape)
+        x = x.flatten(start_dim=1)  
+
+        # lazy FC creation
+        if self.fc1 is None:
+            in_features = x.shape[1]
+            self.fc1 = nn.Linear(in_features, 64).to(x.device)
+            self.fc2 = nn.Linear(64, self.num_classes).to(x.device)
+
         x = F.relu(self.fc1(x))
         x = self.fc2(x)
         return F.log_softmax(x, dim=1)
 
-def train_model(model, train_loader, criterion, optimizer, device, num_epochs=10, log_interval=50):
+def train_model(model, train_loader, criterion, optimizer, device, num_epochs):
     model.to(device)
     history = {"train_loss": [], "train_acc": []}
 
@@ -165,12 +233,6 @@ def train_model(model, train_loader, criterion, optimizer, device, num_epochs=10
             preds = outputs.argmax(dim=1)
             correct += (preds == labels).sum().item()
             total += labels.size(0)
-
-            if (batch_idx + 1) % log_interval == 0 or (batch_idx + 1) == len(train_loader):
-                pbar.set_postfix({
-                    "loss": f"{running_loss / (batch_idx+1):.4f}",
-                    "acc": f"{correct / total:.4f}"
-                })
 
         epoch_loss = running_loss / len(train_loader)
         epoch_acc = correct / total
@@ -218,7 +280,6 @@ def validate_model(model, dataloader, criterion, device):
     print(f"Accuracy: {accuracy:.4f}, Precision: {precision:.4f}, Recall: {recall:.4f}, F1: {f1:.4f}, AUC: {auc:.4f}")
 
     return avg_loss, accuracy, precision, recall, f1, auc
-
 
 def test_model(model, dataloader, criterion, device, hyperparams, output_file="test_results.txt"):
     model.eval()
