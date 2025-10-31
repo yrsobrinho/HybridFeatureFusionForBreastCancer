@@ -175,3 +175,6 @@ cython_debug/
 .pypirc
 notebooks/last_model.pth
 experiments/notebooks/classical/best_model.pth
+
+*.pth
+*.png
