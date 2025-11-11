@@ -117,8 +117,6 @@ def main():
 
         print("\nStarting Quantum feature extraction...")
         _extract_and_save(quantum_model, train_loader, device, directories["quantum_features_dir"], "train")
-        _extract_and_save(quantum_model, test_loader, device, directories["quantum_features_dir"], "test")
-        _extract_and_save(quantum_model, val_loader, device, directories["quantum_features_dir"], "val")
         return
 
     # If not extracting, run the original training flow

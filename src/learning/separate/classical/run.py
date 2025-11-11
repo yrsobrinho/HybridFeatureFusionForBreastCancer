@@ -104,8 +104,6 @@ def main():
 
         print("\nStarting Classical feature extraction...")
         _extract_and_save(model, train_loader, device, dirs["classical_features_dir"], "train")
-        _extract_and_save(model, test_loader, device, dirs["classical_features_dir"], "test")
-        _extract_and_save(model, val_loader, device, dirs["classical_features_dir"], "val")
         return
 
     # If not extracting, run the original training flow
