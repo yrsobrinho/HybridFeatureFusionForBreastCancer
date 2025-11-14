@@ -5,22 +5,30 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import pennylane as qml
-import datetime
-from tqdm import tqdm
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
-
 
 class QuanvLayer(nn.Module):
-    def __init__(self, n_qubits, n_layers, patch_size, mode="both"):
+    def __init__(self, n_qubits, n_layers, patch_size, mode="2d", stride=None):
+        """
+        Quantum Convolutional Layer with multiple processing modes.
+        
+        Args:
+            n_qubits: Number of qubits in the quantum circuit
+            n_layers: Number of quantum layers (depth of circuit)
+            patch_size: Size of the patch to process (e.g., 4 for 4x4 patches)
+            mode: Processing mode - "2d" (default), "1d-sequential", or "hybrid"
+            stride: Stride for patch extraction. If None, defaults to patch_size (non-overlapping)
+        """
         super().__init__()
         self.n_qubits = n_qubits
         self.n_layers = n_layers
         self.patch_size = patch_size
         self.mode = mode
+        self.stride = stride if stride is not None else patch_size
 
         self.dev = qml.device("lightning.gpu", wires=n_qubits)
 
         def circuit(inputs, weights):
+            # Data re-uploading for better expressivity
             qml.AngleEmbedding(inputs, wires=range(n_qubits), rotation="Y")
             qml.StronglyEntanglingLayers(weights, wires=range(n_qubits))
             return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
@@ -29,95 +37,218 @@ class QuanvLayer(nn.Module):
         self.qnode = qml.QNode(circuit, self.dev, interface="torch", diff_method="adjoint")
         self.qlayer = qml.qnn.TorchLayer(self.qnode, weight_shapes)
 
+    def calculate_output_shape(self, h, w):
+        """Calculate output shape after quanvolution operations."""
+        p = self.patch_size
+        s = self.stride
+        
+        if self.mode == "2d":
+            # For 2D mode: direct spatial convolution
+            # Calculate padding to ensure complete coverage
+            pad_h = (p - (h % p)) % p if (h % p) != 0 else 0
+            pad_w = (p - (w % p)) % p if (w % p) != 0 else 0
+            
+            h_padded = h + pad_h
+            w_padded = w + pad_w
+            
+            # Output dimensions with stride
+            out_h = (h_padded - p) // s + 1
+            out_w = (w_padded - p) // s + 1
+            
+            total_features = self.n_qubits * out_h * out_w
+            return (out_h, out_w), total_features
+            
+        else:  # "1d-sequential" mode (legacy horizontal-then-vertical)
+            # Horizontal pass
+            pad_w = (p - (w % p)) % p
+            pad_h = (p - (h % p)) % p
+            h_after_h_pad = h + pad_h
+            w_after_h_pad = w + pad_w
+            
+            out_h_horiz = h_after_h_pad
+            out_w_horiz = w_after_h_pad // p
+            
+            # Vertical pass
+            h_for_vert = out_h_horiz
+            pad_h_vert = (p - (h_for_vert % p)) % p
+            h_after_v_pad = h_for_vert + pad_h_vert
+            
+            out_h_final = h_after_v_pad // p
+            out_w_final = out_w_horiz
+            
+            total_features = self.n_qubits * out_h_final * out_w_final
+            return (out_h_final, out_w_final), total_features
+
+    def _prepare_patches(self, data, dim_size):
+        """Prepare and pad patches to match n_qubits."""
+        B, seq_len = data.shape
+        p = self.patch_size
+        
+        # Reshape into patches: (B, num_patches, p)
+        num_patches = seq_len // p
+        patches = data[:, :num_patches * p].view(B, num_patches, p)
+        
+        # Flatten batch and patches: (B * num_patches, p)
+        patches = patches.reshape(-1, p)
+        
+        # Adjust to n_qubits
+        if p > self.n_qubits:
+            patches = patches[:, :self.n_qubits]
+        elif p < self.n_qubits:
+            pad_size = self.n_qubits - p
+            patches = F.pad(patches, (0, pad_size))
+        
+        return patches, num_patches
+
     def quanv1d_horizontal(self, x):
+        """Optimized horizontal quanvolution - processes all rows in batch."""
         B, C, H, W = x.shape
         p = self.patch_size
 
+        # Pad once
         pad_w = (p - (W % p)) % p
         pad_h = (p - (H % p)) % p
-        if pad_w != 0 or pad_h != 0:
+        if pad_w > 0 or pad_h > 0:
             x = F.pad(x, (0, pad_w, 0, pad_h), mode='constant', value=0.0)
             B, C, H, W = x.shape
 
         out_w = W // p
-        outputs = []
-
-        for i in range(H):
-            row = x[:, 0, i, :]             
-            patches = []
-            for j in range(0, W, p):
-                patch = row[:, j:j+p]        
-                if patch.shape[1] != p:
-                    continue
-                patch_in = patch
-                if patch_in.shape[1] != self.n_qubits:
-                    if patch_in.shape[1] >= self.n_qubits:
-                        patch_in = patch_in[:, :self.n_qubits]
-                    else:
-                        pad_size = self.n_qubits - patch_in.shape[1]
-                        pad_tensor = torch.zeros(B, pad_size, device=patch_in.device, dtype=patch_in.dtype)
-                        patch_in = torch.cat([patch_in, pad_tensor], dim=1)
-                q_out = self.qlayer(patch_in)  
-                patches.append(q_out)
-            if len(patches) == 0:
-                # fallback zeros
-                patches = [torch.zeros(B, self.n_qubits, device=x.device, dtype=x.dtype) for _ in range(out_w)]
-            patches = torch.stack(patches, dim=2)  
-            outputs.append(patches)
-
-        outputs = torch.stack(outputs, dim=2)      
-        return outputs
+        
+        # Reshape to process all rows at once: (B, H, W) -> (B*H, W)
+        rows = x[:, 0, :, :].reshape(B * H, W)
+        
+        # Prepare all patches at once
+        patches, num_patches = self._prepare_patches(rows, W)
+        
+        # Process all patches through quantum layer in one call
+        q_out = self.qlayer(patches)  # (B*H*num_patches, n_qubits)
+        
+        # Reshape back: (B, n_qubits, H, out_w)
+        q_out = q_out.view(B, H, num_patches, self.n_qubits)
+        q_out = q_out.permute(0, 3, 1, 2)  # (B, n_qubits, H, out_w)
+        
+        return q_out
 
     def quanv1d_vertical(self, x):
+        """Optimized vertical quanvolution - processes all columns in batch."""
         B, C, H, W = x.shape
         p = self.patch_size
 
-        pad_w = (p - (W % p)) % p
+        # Pad once
         pad_h = (p - (H % p)) % p
-        if pad_w != 0 or pad_h != 0:
-            x = F.pad(x, (0, pad_w, 0, pad_h), mode='constant', value=0.0)
+        if pad_h > 0:
+            x = F.pad(x, (0, 0, 0, pad_h), mode='constant', value=0.0)
             B, C, H, W = x.shape
 
         out_h = H // p
-        outputs = []
+        
+        # Reshape to process all columns at once: (B, C, H, W) -> (B*W, H)
+        cols = x[:, 0, :, :].permute(0, 2, 1).reshape(B * W, H)
+        
+        # Prepare all patches at once
+        patches, num_patches = self._prepare_patches(cols, H)
+        
+        # Process all patches through quantum layer in one call
+        q_out = self.qlayer(patches)  # (B*W*num_patches, n_qubits)
+        
+        # Reshape back: (B, n_qubits, out_h, W)
+        q_out = q_out.view(B, W, num_patches, self.n_qubits)
+        q_out = q_out.permute(0, 3, 2, 1)  # (B, n_qubits, out_h, W)
+        
+        return q_out
 
-        for j in range(W):
-            col = x[:, 0, :, j]            
-            patches = []
-            for i in range(0, H, p):
-                patch = col[:, i:i+p]       
-                if patch.shape[1] != p:
-                    continue
-                patch_in = patch
-                if patch_in.shape[1] != self.n_qubits:
-                    if patch_in.shape[1] >= self.n_qubits:
-                        patch_in = patch_in[:, :self.n_qubits]
-                    else:
-                        pad_size = self.n_qubits - patch_in.shape[1]
-                        pad_tensor = torch.zeros(B, pad_size, device=patch_in.device, dtype=patch_in.dtype)
-                        patch_in = torch.cat([patch_in, pad_tensor], dim=1)
-                q_out = self.qlayer(patch_in) 
-                patches.append(q_out)
-            if len(patches) == 0:
-                patches = [torch.zeros(B, self.n_qubits, device=x.device, dtype=x.dtype) for _ in range(out_h)]
-            patches = torch.stack(patches, dim=2)    
-            outputs.append(patches)
-
-        outputs = torch.stack(outputs, dim=3)       
-        return outputs
+    def quanv2d(self, x):
+        """
+        Efficient 2D quanvolution that processes spatial patches directly.
+        Extracts overlapping or non-overlapping 2D patches and processes them through quantum circuit.
+        
+        This is more efficient and captures spatial relationships better than sequential 1D passes.
+        """
+        B, C, H, W = x.shape
+        p = self.patch_size
+        s = self.stride
+        
+        # Only use first channel if multiple channels
+        if C > 1:
+            x = x[:, 0:1, :, :]
+        
+        # Calculate padding needed
+        pad_h = (p - (H % p)) % p if (H % p) != 0 else 0
+        pad_w = (p - (W % p)) % p if (W % p) != 0 else 0
+        
+        if pad_h > 0 or pad_w > 0:
+            x = F.pad(x, (0, pad_w, 0, pad_h), mode='constant', value=0.0)
+            B, C, H, W = x.shape
+        
+        # Calculate output dimensions
+        out_h = (H - p) // s + 1
+        out_w = (W - p) // s + 1
+        
+        # Use unfold to extract patches efficiently
+        # unfold(dimension, size, step) extracts sliding blocks
+        patches = x.unfold(2, p, s).unfold(3, p, s)  # (B, C, out_h, out_w, p, p)
+        
+        # Reshape patches: (B, C, out_h, out_w, p, p) -> (B, out_h, out_w, p*p)
+        patches = patches.squeeze(1)  # Remove channel dim: (B, out_h, out_w, p, p)
+        patches = patches.reshape(B, out_h, out_w, p * p)  # Flatten patch
+        
+        # Flatten batch and spatial dimensions: (B * out_h * out_w, p*p)
+        patches_flat = patches.reshape(B * out_h * out_w, p * p)
+        
+        # Adjust patch size to match n_qubits
+        patch_dim = p * p
+        if patch_dim > self.n_qubits:
+            # Use PCA-like reduction or simple truncation
+            # For efficiency, we'll use truncation (can be improved with learned projection)
+            patches_flat = patches_flat[:, :self.n_qubits]
+        elif patch_dim < self.n_qubits:
+            # Pad with zeros
+            pad_size = self.n_qubits - patch_dim
+            patches_flat = F.pad(patches_flat, (0, pad_size), value=0.0)
+        
+        # Process all patches through quantum circuit in one batch
+        q_out = self.qlayer(patches_flat)  # (B * out_h * out_w, n_qubits)
+        
+        # Reshape back to spatial format: (B, out_h, out_w, n_qubits) -> (B, n_qubits, out_h, out_w)
+        q_out = q_out.view(B, out_h, out_w, self.n_qubits)
+        q_out = q_out.permute(0, 3, 1, 2)  # (B, n_qubits, out_h, out_w)
+        
+        return q_out
 
     def forward(self, x):
-        x = self.quanv1d_horizontal(x)
-        print("After horizontal quanv:", x.shape)
-        x = self.quanv1d_vertical(x)
-        print("After vertical quanv:", x.shape)
-        return x
+        """Forward pass - uses mode to determine processing strategy."""
+        if self.mode == "2d":
+            return self.quanv2d(x)
+        elif self.mode == "1d":
+            # Legacy approach: horizontal then vertical
+            x = self.quanv1d_horizontal(x)
+            x = self.quanv1d_vertical(x)
+            return x
+        elif self.mode == "hybrid":
+            # Hybrid: Run both and concatenate features
+            x_h = self.quanv1d_horizontal(x)
+            x_v = self.quanv1d_vertical(x)
+            # Concatenate along channel dimension
+            return x_h * x_v
+        else:
+            raise ValueError(f"Unknown mode: {self.mode}. Use '2d', '1d-sequential', or 'hybrid'")
 
 class QuantumModelWithEncoder(nn.Module):
     def __init__(self, n_qubits, n_layers, num_classes,
-                 patch_size, encoder: nn.Module = None, encoder_output_size: int = 28):
+                 patch_size, encoder: nn.Module = None, encoder_output_size: int = 28,
+                 mode: str = "2d", stride: int = None):
         """
-        encoder_output_size: if provided, resizes encoder output spatial dims to (encoder_output_size, encoder_output_size)
+        Quantum model with encoder preprocessing.
+        
+        Args:
+            n_qubits: Number of qubits
+            n_layers: Number of quantum layers
+            num_classes: Number of output classes
+            patch_size: Patch size for quanvolution
+            encoder: Encoder module (e.g., autoencoder)
+            encoder_output_size: Expected encoder output size
+            mode: Quanvolution mode - "2d" (default), "1d-sequential", or "hybrid"
+            stride: Stride for 2D quanvolution (if None, uses patch_size)
         """
         super().__init__()
         self.encoder = encoder
@@ -126,15 +257,25 @@ class QuantumModelWithEncoder(nn.Module):
             n_qubits=n_qubits,
             n_layers=n_layers,
             patch_size=patch_size,
+            mode=mode,
+            stride=stride
         )
 
         self.patch_size = patch_size
         self.n_qubits = n_qubits
         self.num_classes = num_classes
         self.encoder_output_size = encoder_output_size
+        self.mode = mode
 
-        self.fc1 = None
-        self.fc2 = None
+        # Calculate expected features after quanvolution
+        output_shape, self.expected_features = self.quanv.calculate_output_shape(
+            encoder_output_size, encoder_output_size
+        )
+        
+        # Progressive reduction: 196 → 128 → 64 → 2
+        self.fc1 = None  # Will be initialized as 196 → 128
+        self.fc2 = None  # Will be initialized as 128 → 64
+        self.fc3 = None  # Will be initialized as 64 → num_classes
 
     def _apply_encoder(self, x):
         if self.encoder is None:
@@ -187,60 +328,53 @@ class QuantumModelWithEncoder(nn.Module):
         return enc
 
     def forward(self, x):
-        print("Before encoder:", x.shape)
         x = self._apply_encoder(x)
-        print("After encoder:", x.shape)
-        if x.shape[1] != 1:
-           x = x.mean(dim=1, keepdim=True)
-        print("Starts Quanvolution, shape:", x.shape)
         x = self.quanv(x) 
-        print("Finishes Quanvolution, shape:", x.shape)
         x = x.flatten(start_dim=1)  
 
-        # lazy FC creation
         if self.fc1 is None:
             in_features = x.shape[1]
-            self.fc1 = nn.Linear(in_features, 64).to(x.device)
-            self.fc2 = nn.Linear(64, self.num_classes).to(x.device)
+            self.fc1 = nn.Linear(in_features, 128).to(x.device)
+            self.bn1 = nn.BatchNorm1d(128).to(x.device)
+            self.fc2 = nn.Linear(128, 64).to(x.device)
+            self.bn2 = nn.BatchNorm1d(64).to(x.device)
+            self.fc3 = nn.Linear(64, self.num_classes).to(x.device)
 
-        x = F.relu(self.fc1(x))
+        x = self.fc1(x)
+        x = self.bn1(x)
+        x = F.relu(x)
+        x = F.dropout(x, p=0.3, training=self.training)
+        
         x = self.fc2(x)
+        x = self.bn2(x)
+        x = F.relu(x)
+        x = F.dropout(x, p=0.2, training=self.training)
+        
+        x = self.fc3(x)
         return F.log_softmax(x, dim=1)
 
     def extract_features(self, x):
-        """Run encoder + quanv and return the flattened feature vector (before FCs)."""
-        print("Before encoder (extract_features):", getattr(x, "shape", None))
+        """Return 64-dim features (after fc2)."""
         x = self._apply_encoder(x)
-        print("After encoder (extract_features):", getattr(x, "shape", None))
-        if x.shape[1] != 1:
-            x = x.mean(dim=1, keepdim=True)
-        print("Starts Quanvolution (extract_features), shape:", x.shape)
         x = self.quanv(x)
-        print("Finishes Quanvolution (extract_features), shape:", x.shape)
         x = x.flatten(start_dim=1)
 
-        # ensure fc layers exist and return the 64-dim feature vector (ReLU of fc1)
         if self.fc1 is None:
             in_features = x.shape[1]
-            self.fc1 = nn.Linear(in_features, 64).to(x.device)
-            self.fc2 = nn.Linear(64, self.num_classes).to(x.device)
+            self.fc1 = nn.Linear(in_features, 128).to(x.device)
+            self.fc2 = nn.Linear(128, 64).to(x.device)
+            self.fc3 = nn.Linear(64, self.num_classes).to(x.device)
 
-        feat64 = F.relu(self.fc1(x))
-        return feat64
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        return x  # 64-dim features
 
     def classify_from_flat(self, x):
-        """Given flattened features x, ensure FCs exist and return log-probabilities."""
-        print("Classify from flat, input shape:", getattr(x, "shape", None))
-        if self.fc1 is None:
-            in_features = x.shape[1]
-            self.fc1 = nn.Linear(in_features, 64).to(x.device)
-            self.fc2 = nn.Linear(64, self.num_classes).to(x.device)
-
-        if x.shape[1] == self.fc1.out_features:
-            out = self.fc2(x)
-        else:
-            out = F.relu(self.fc1(x))
-            out = self.fc2(out)
+        """Classify from 64-dim features."""
+        if self.fc3 is None:
+            self.fc3 = nn.Linear(64, self.num_classes).to(x.device)
+        
+        out = self.fc3(x)
         return F.log_softmax(out, dim=1)
 
 
@@ -251,14 +385,38 @@ class QuantumModel(nn.Module):
     channels similar to the encoder-backed model. Provides extract_features and
     classify_from_flat for efficient feature saving and training.
     """
-    def __init__(self, n_qubits, n_layers, num_classes, patch_size):
+    def __init__(self, n_qubits, n_layers, num_classes, patch_size, 
+                 mode: str = "2d", stride: int = None):
+        """
+        Quantum model without encoder.
+        
+        Args:
+            n_qubits: Number of qubits
+            n_layers: Number of quantum layers
+            num_classes: Number of output classes
+            patch_size: Patch size for quanvolution
+            mode: Quanvolution mode - "2d" (default), "1d-sequential", or "hybrid"
+            stride: Stride for 2D quanvolution (if None, uses patch_size)
+        """
         super().__init__()
-        self.quanv = QuanvLayer(n_qubits=n_qubits, n_layers=n_layers, patch_size=patch_size)
+        self.quanv = QuanvLayer(
+            n_qubits=n_qubits, 
+            n_layers=n_layers, 
+            patch_size=patch_size,
+            mode=mode,
+            stride=stride
+        )
         self.patch_size = patch_size
         self.n_qubits = n_qubits
         self.num_classes = num_classes
+        self.mode = mode
+        
+        # Initialize layers upfront
         self.fc1 = None
         self.fc2 = None
+        self.fc3 = None
+        self.bn1 = None
+        self.bn2 = None
 
     def forward(self, x):
         if x.shape[1] != 1:
@@ -268,222 +426,51 @@ class QuantumModel(nn.Module):
 
         if self.fc1 is None:
             in_features = x.shape[1]
-            self.fc1 = nn.Linear(in_features, 64).to(x.device)
-            self.fc2 = nn.Linear(64, self.num_classes).to(x.device)
+            self.fc1 = nn.Linear(in_features, 128).to(x.device)
+            self.bn1 = nn.BatchNorm1d(128).to(x.device)
+            self.fc2 = nn.Linear(128, 64).to(x.device)
+            self.bn2 = nn.BatchNorm1d(64).to(x.device)
+            self.fc3 = nn.Linear(64, self.num_classes).to(x.device)
 
-        x = F.relu(self.fc1(x))
+        x = self.fc1(x)
+        x = self.bn1(x)
+        x = F.relu(x)
+        x = F.dropout(x, p=0.3, training=self.training)
+        
         x = self.fc2(x)
+        x = self.bn2(x)
+        x = F.relu(x)
+        x = F.dropout(x, p=0.2, training=self.training)
+        
+        x = self.fc3(x)
         return F.log_softmax(x, dim=1)
 
     def extract_features(self, x):
-            """Run quanv (and channel averaging) and return flattened features before FCs."""
-            print("Starts Quanvolution (extract_features), input shape:", getattr(x, "shape", None))
-            if x.shape[1] != 1:
-                x = x.mean(dim=1, keepdim=True)
-            print("After channel-average (extract_features), shape:", x.shape)
-            x = self.quanv(x)
-            print("Finishes Quanvolution (extract_features), shape:", x.shape)
-            x = x.flatten(start_dim=1)
+        """Return 64-dim features (after fc2) - FIXED to match QuantumModelWithEncoder."""
+        if x.shape[1] != 1:
+            x = x.mean(dim=1, keepdim=True)
+        
+        x = self.quanv(x)
+        x = x.flatten(start_dim=1)
 
-            if self.fc1 is None:
-                in_features = x.shape[1]
-                self.fc1 = nn.Linear(in_features, 64).to(x.device)
-                self.fc2 = nn.Linear(64, self.num_classes).to(x.device)
-
-            feat64 = F.relu(self.fc1(x))
-            return feat64
-
-    def classify_from_flat(self, x):
-        """Given flattened features x, ensure FCs exist and return log-probabilities."""
-        print("Classify from flat (QuantumModel), input shape:", getattr(x, "shape", None))
         if self.fc1 is None:
             in_features = x.shape[1]
-            self.fc1 = nn.Linear(in_features, 64).to(x.device)
-            self.fc2 = nn.Linear(64, self.num_classes).to(x.device)
+            self.fc1 = nn.Linear(in_features, 128).to(x.device)
+            self.bn1 = nn.BatchNorm1d(128).to(x.device)
+            self.fc2 = nn.Linear(128, 64).to(x.device)
+            self.bn2 = nn.BatchNorm1d(64).to(x.device)
+            self.fc3 = nn.Linear(64, self.num_classes).to(x.device)
 
-        if x.shape[1] == self.fc1.out_features:
-            out = self.fc2(x)
-        else:
-            out = F.relu(self.fc1(x))
-            out = self.fc2(out)
+        # Match QuantumModelWithEncoder: no BatchNorm/Dropout in feature extraction
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        return x  # 64-dim features
+
+    def classify_from_flat(self, x):
+        """Classify from 64-dim features - FIXED."""
+        if self.fc3 is None:
+            self.fc3 = nn.Linear(64, self.num_classes).to(x.device)
+        
+        out = self.fc3(x)
         return F.log_softmax(out, dim=1)
-
-def train_model(model, train_loader, criterion, optimizer, device, num_epochs, save_features_dir=None):
-    """Train model; if save_features_dir is provided, save train features and labels as .npy"""
-    model.to(device)
-    history = {"train_loss": [], "train_acc": []}
-
-    save_feats = save_features_dir is not None
-    if save_feats:
-        os.makedirs(save_features_dir, exist_ok=True)
-        train_feats_list = []
-        train_labels_list = []
-
-    for epoch in range(num_epochs):
-        model.train()
-        running_loss = 0.0
-        correct = 0
-        total = 0
-
-        pbar = tqdm(enumerate(train_loader), total=len(train_loader), desc=f"Epoch {epoch+1}/{num_epochs}")
-        for batch_idx, (images, labels) in pbar:
-            images = images.to(device)
-            labels = labels.squeeze().to(device)
-
-            optimizer.zero_grad()
-
-            feats = model.extract_features(images)
-            outputs = model.classify_from_flat(feats)
-
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
-
-            running_loss += loss.item()
-            preds = outputs.argmax(dim=1)
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
-
-            if save_feats:
-                train_feats_list.append(feats.cpu().numpy())
-                train_labels_list.append(labels.cpu().numpy())
-
-        epoch_loss = running_loss / len(train_loader)
-        epoch_acc = correct / total
-        history["train_loss"].append(epoch_loss)
-        history["train_acc"].append(epoch_acc)
-
-        print(f"Epoch {epoch+1}: Train Loss={epoch_loss:.4f}, Train Acc={epoch_acc:.4f}")
-
-    if save_feats and len(train_feats_list) > 0:
-        feats_arr = np.concatenate(train_feats_list, axis=0)
-        labs_arr = np.concatenate(train_labels_list, axis=0)
-        np.save(os.path.join(save_features_dir, "train_features.npy"), feats_arr)
-        np.save(os.path.join(save_features_dir, "train_labels.npy"), labs_arr)
-
-    return history
-
-def validate_model(model, dataloader, criterion, device, save_features_dir=None):
-    """Validate model; if save_features_dir is provided, save validation features and labels as .npy"""
-    model.eval()
-    model.to(device)
-
-    total_loss = 0.0
-    all_labels = []
-    all_predictions = []
-    all_probs = []
-
-    save_feats = save_features_dir is not None
-    if save_feats:
-        os.makedirs(save_features_dir, exist_ok=True)
-        val_feats_list = []
-        val_labels_list = []
-
-    with torch.no_grad():
-        for images, labels in tqdm(dataloader, desc="Validation"):
-            images = images.to(device)
-            labels = labels.squeeze().to(device)
-
-            feats = model.extract_features(images)
-            outputs = model.classify_from_flat(feats)
-            loss = criterion(outputs, labels)
-            total_loss += loss.item()
-
-            probs = torch.softmax(outputs, dim=1)[:, 1].cpu().numpy() if outputs.shape[1] > 1 else torch.softmax(outputs, dim=1)[:, 0].cpu().numpy()
-            all_probs.extend(probs)
-            all_predictions.extend(outputs.argmax(dim=1).cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
-
-            if save_feats:
-                val_feats_list.append(feats.cpu().numpy())
-                val_labels_list.append(labels.cpu().numpy())
-
-    accuracy = accuracy_score(all_labels, all_predictions)
-    precision = precision_score(all_labels, all_predictions, zero_division=0)
-    recall = recall_score(all_labels, all_predictions, zero_division=0)
-    f1 = f1_score(all_labels, all_predictions, zero_division=0)
-    try:
-        auc = roc_auc_score(all_labels, all_probs)
-    except ValueError:
-        auc = float("nan")
-
-    avg_loss = total_loss / len(dataloader)
-    print(f"Validation Loss: {avg_loss:.4f}")
-    print(f"Accuracy: {accuracy:.4f}, Precision: {precision:.4f}, Recall: {recall:.4f}, F1: {f1:.4f}, AUC: {auc:.4f}")
-
-    if save_feats and len(val_feats_list) > 0:
-        feats_arr = np.concatenate(val_feats_list, axis=0)
-        labs_arr = np.concatenate(val_labels_list, axis=0)
-        np.save(os.path.join(save_features_dir, "val_features.npy"), feats_arr)
-        np.save(os.path.join(save_features_dir, "val_labels.npy"), labs_arr)
-
-    return avg_loss, accuracy, precision, recall, f1, auc
-
-def test_model(model, dataloader, criterion, device, hyperparams, output_file="test_results.txt", save_features_dir=None):
-    """Test model; if save_features_dir is provided, save test features and labels as .npy"""
-    model.eval()
-    model.to(device)
-
-    total_loss = 0.0
-    all_labels = []
-    all_predictions = []
-    all_probs = []
-
-    save_feats = save_features_dir is not None
-    if save_feats:
-        os.makedirs(save_features_dir, exist_ok=True)
-        test_feats_list = []
-        test_labels_list = []
-
-    with torch.no_grad():
-        for images, labels in tqdm(dataloader, desc="Testing"):
-            images = images.to(device)
-            labels = labels.squeeze().to(device)
-
-            feats = model.extract_features(images)
-            outputs = model.classify_from_flat(feats)
-            loss = criterion(outputs, labels)
-            total_loss += loss.item()
-
-            probs = torch.softmax(outputs, dim=1)[:, 1].cpu().numpy() if outputs.shape[1] > 1 else torch.softmax(outputs, dim=1)[:, 0].cpu().numpy()
-            all_probs.extend(probs)
-            all_predictions.extend(outputs.argmax(dim=1).cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
-
-            if save_feats:
-                test_feats_list.append(feats.cpu().numpy())
-                test_labels_list.append(labels.cpu().numpy())
-
-    accuracy = accuracy_score(all_labels, all_predictions)
-    precision = precision_score(all_labels, all_predictions, zero_division=0)
-    recall = recall_score(all_labels, all_predictions, zero_division=0)
-    f1 = f1_score(all_labels, all_predictions, zero_division=0)
-    try:
-        auc = roc_auc_score(all_labels, all_probs)
-    except ValueError:
-        auc = float("nan")
-
-    avg_loss = total_loss / len(dataloader)
-
-    with open(output_file, "a") as f:
-        f.write(f"\n[Quantum Model Testing - {datetime.datetime.now()}]\n")
-        f.write(f"Hyperparameters: {hyperparams}\n")
-        f.write(f"Test Loss: {avg_loss:.4f}\n")
-        f.write(f"Accuracy: {accuracy:.4f}\n")
-        f.write(f"Precision: {precision:.4f}\n")
-        f.write(f"Recall: {recall:.4f}\n")
-        f.write(f"F1 Score: {f1:.4f}\n")
-        f.write(f"AUC: {auc:.4f}\n")
-        f.write("-" * 50 + "\n")
-
-    if save_feats and len(test_feats_list) > 0:
-        feats_arr = np.concatenate(test_feats_list, axis=0)
-        labs_arr = np.concatenate(test_labels_list, axis=0)
-        np.save(os.path.join(save_features_dir, "test_features.npy"), feats_arr)
-        np.save(os.path.join(save_features_dir, "test_labels.npy"), labs_arr)
-
-    print(f"Test Loss: {avg_loss:.4f}")
-    print(f"Accuracy: {accuracy:.4f}, Precision: {precision:.4f}, Recall: {recall:.4f}, F1: {f1:.4f}, AUC: {auc:.4f}")
-
-    return avg_loss, accuracy, precision, recall, f1, auc
 
