@@ -168,10 +168,6 @@ class QuanvLayer(nn.Module):
         p = self.patch_size
         s = self.stride
         
-        # Only use first channel if multiple channels
-        if C > 1:
-            x = x[:, 0:1, :, :]
-        
         # Calculate padding needed
         pad_h = (p - (H % p)) % p if (H % p) != 0 else 0
         pad_w = (p - (W % p)) % p if (W % p) != 0 else 0
@@ -220,16 +216,13 @@ class QuanvLayer(nn.Module):
         if self.mode == "2d":
             return self.quanv2d(x)
         elif self.mode == "1d":
-            # Legacy approach: horizontal then vertical
             x = self.quanv1d_horizontal(x)
             x = self.quanv1d_vertical(x)
             return x
         elif self.mode == "hybrid":
-            # Hybrid: Run both and concatenate features
             x_h = self.quanv1d_horizontal(x)
             x_v = self.quanv1d_vertical(x)
-            # Concatenate along channel dimension
-            return x_h * x_v
+            return x_v @ x_h
         else:
             raise ValueError(f"Unknown mode: {self.mode}. Use '2d', '1d-sequential', or 'hybrid'")
 

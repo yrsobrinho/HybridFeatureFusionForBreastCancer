@@ -27,7 +27,7 @@ def main():
                         help='Stride for 2D quanvolution. If None, uses patch_size (non-overlapping)')
     args = parser.parse_args()
 
-    autoencoder_path = "/home/eflammere/HybridEmbeddingsForBreastCancerDetection/experiments/models/autoencoder1/autoencoder1.pth"
+    autoencoder_path = "/home/eflammere/HybridEmbeddingsForBreastCancerDetection/experiments/models/autoencoder/autoencoder.pth"
     device = setup_device()
     directories = setup_directories()
 

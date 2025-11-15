@@ -1,0 +1,43 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+
+
+        {
+            "name": "Python: run.py --encoder",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/learning/quantum/run.py",
+            "console": "integratedTerminal",
+            "args": ["--encoder"],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+        },
+        {
+            "name": "Python: run.py --encoder --mode hybrid",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/learning/quantum/run.py",
+            "console": "integratedTerminal",
+            "args": ["--encoder", "--mode", "hybrid"],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+        },
+        {
+            "name": "Python: run.py --encoder --mode 2d",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/learning/quantum/run.py",
+            "console": "integratedTerminal",
+            "args": ["--encoder", "--mode", "2d"],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        }
+    ]
+}
