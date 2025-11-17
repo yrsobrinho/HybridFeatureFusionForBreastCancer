@@ -8,13 +8,176 @@ import datetime
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 from src.models.preprocessing.autoencoder import Encoder
 
+
+class ShallowCNN(nn.Module):
+    """
+    Shallow CNN with only 3 convolutional layers for faster training and comparison.
+    Simple architecture: Conv -> Conv -> Conv -> FC
+    """
+    def __init__(self, num_classes=2, input_channels=1):
+        super(ShallowCNN, self).__init__()
+        
+        # 3 Convolutional layers
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(input_channels, 32, kernel_size=3, stride=2, padding=1),  # 224x224 -> 112x112
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2, 2)  # 112x112 -> 56x56
+        )
+        
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),  # 56x56 -> 28x28
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2, 2)  # 28x28 -> 14x14
+        )
+        
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),  # 14x14 -> 7x7
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d((1, 1))  # 7x7 -> 1x1
+        )
+        
+        # Fully connected classifier
+        self.fc = nn.Linear(128, num_classes)
+        
+    def extract_features(self, x):
+        """Extract features before final classification layer."""
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = self.conv3(x)
+        x = x.view(x.size(0), -1)  # Flatten to (B, 128)
+        return x
+    
+    def forward(self, x):
+        features = self.extract_features(x)
+        output = self.fc(features)
+        return output
+
+
+class ShallowCNNWithEncoder(nn.Module):
+    """
+    Shallow CNN with Encoder preprocessing.
+    Uses autoencoder to compress 224x224 -> 28x28, then applies 3 conv layers.
+    """
+    def __init__(self, num_classes=2, encoder=None, encoder_output_size=28):
+        super(ShallowCNNWithEncoder, self).__init__()
+        
+        # Use provided encoder or create default
+        self.encoder = encoder if encoder is not None else Encoder()
+        self.encoder_output_size = encoder_output_size
+        
+        # Freeze encoder parameters
+        for param in self.encoder.parameters():
+            param.requires_grad = False
+        
+        # Detect number of channels from encoder output
+        # Most encoders output shape (B, C, H, W) where C varies
+        # We'll determine this dynamically in forward pass
+        self.conv_input_channels = None
+        
+        # 3 Convolutional layers (input will be 28x28 from encoder)
+        self.conv1 = None  # Will be initialized dynamically
+        self.conv2 = None
+        self.conv3 = None
+        
+        # Fully connected classifier
+        self.fc = nn.Linear(64, num_classes)
+        
+    def _init_conv_layers(self, input_channels, device):
+        """Initialize conv layers based on encoder output channels."""
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(input_channels, 32, kernel_size=3, stride=1, padding=1),  # 28x28 -> 28x28
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2, 2)  # 28x28 -> 14x14
+        ).to(device)
+        
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(32, 48, kernel_size=3, stride=1, padding=1),  # 14x14 -> 14x14
+            nn.BatchNorm2d(48),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2, 2)  # 14x14 -> 7x7
+        ).to(device)
+        
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(48, 64, kernel_size=3, stride=1, padding=1),  # 7x7 -> 7x7
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d((1, 1))  # 7x7 -> 1x1
+        ).to(device)
+        
+        self.conv_input_channels = input_channels
+    
+    def _apply_encoder(self, x):
+        """Apply encoder and handle different output formats."""
+        with torch.no_grad():
+            encoded = self.encoder(x)
+        
+        # Handle different encoder output formats
+        if isinstance(encoded, (tuple, list)):
+            encoded = encoded[0]  # Take first element if tuple/list
+        
+        # Ensure 4D tensor (B, C, H, W)
+        if encoded.ndim == 2:
+            # (B, features) -> reshape to spatial
+            B, F = encoded.shape
+            H = W = int(np.sqrt(F))
+            if H * W != F:
+                H = W = self.encoder_output_size
+                encoded = torch.nn.functional.interpolate(
+                    encoded.view(B, 1, 1, F), 
+                    size=(H, W), 
+                    mode='bilinear', 
+                    align_corners=False
+                )
+            else:
+                encoded = encoded.view(B, 1, H, W)
+        elif encoded.ndim == 3:
+            # (B, C, L) -> reshape
+            encoded = encoded.unsqueeze(-1)
+        
+        # Resize to expected encoder output size if needed
+        if encoded.shape[-2:] != (self.encoder_output_size, self.encoder_output_size):
+            encoded = torch.nn.functional.interpolate(
+                encoded, 
+                size=(self.encoder_output_size, self.encoder_output_size),
+                mode='bilinear',
+                align_corners=False
+            )
+        
+        return encoded
+    
+    def extract_features(self, x):
+        """Extract features before final classification layer."""
+        # Apply encoder
+        x = self._apply_encoder(x)
+        
+        # Initialize conv layers if needed
+        if self.conv1 is None:
+            self._init_conv_layers(x.shape[1], x.device)
+        
+        # Apply conv layers
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = self.conv3(x)
+        x = x.view(x.size(0), -1)  # Flatten to (B, 64)
+        return x
+    
+    def forward(self, x):
+        features = self.extract_features(x)
+        output = self.fc(features)
+        return output
+
+
 class ClassicalModel(nn.Module):
     def __init__(self, num_classes):
         super(ClassicalModel, self).__init__()
         self.resnet = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
         self.resnet.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
         self.resnet.fc = nn.Linear(self.resnet.fc.in_features, num_classes)
-        # feature extractor (everything up to the final fc). Keep for feature saving.
+       
         self.features = nn.Sequential(*list(self.resnet.children())[:-1])
         
     def forward(self, x):
@@ -22,10 +185,8 @@ class ClassicalModel(nn.Module):
 
     def extract_features(self, x):
         """Return the flattened features from the ResNet backbone (before final fc)."""
-        # self.features is nn.Sequential of resnet children up to avgpool
         with torch.no_grad():
             feats = self.features(x)
-        # feats shape may be (B, C, 1, 1) -> flatten to (B, C)
         feats = torch.flatten(feats, 1)
         return feats
 
