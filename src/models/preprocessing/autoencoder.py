@@ -14,10 +14,20 @@ parent_dir = os.path.dirname(os.path.dirname(current_dir))
 sys.path.append(parent_dir)
 
 class Encoder(nn.Module):
-    def __init__(self):
+    def __init__(self, input_channels=1, latent_channels=1):
+        """
+        Flexible Encoder that can work with different channel configurations.
+        
+        Args:
+            input_channels: Number of input channels (1 for grayscale, 3 for RGB)
+            latent_channels: Number of channels in latent representation (1, 3, 64, etc.)
+        """
         super(Encoder, self).__init__()
+        self.input_channels = input_channels
+        self.latent_channels = latent_channels
+        
         self.encoder = nn.Sequential(
-            nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(input_channels, 16, kernel_size=3, stride=1, padding=1),
             nn.ReLU(True),
             nn.MaxPool2d(2, 2),
             nn.BatchNorm2d(16),
@@ -29,10 +39,10 @@ class Encoder(nn.Module):
             nn.BatchNorm2d(32),
             nn.Dropout(0.1),
 
-            nn.Conv2d(32, 1, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(32, latent_channels, kernel_size=3, stride=1, padding=1),
             nn.ReLU(True), 
             nn.MaxPool2d(2, 2),
-            nn.BatchNorm2d(1),
+            nn.BatchNorm2d(latent_channels),
             nn.Dropout(0.1),
         )
         
@@ -40,15 +50,28 @@ class Encoder(nn.Module):
         return self.encoder(x)
 
 class Decoder(nn.Module):
-    def __init__(self):
+    def __init__(self, latent_channels=1, output_channels=1):
+        """
+        Flexible Decoder that can work with different channel configurations.
+        
+        Args:
+            latent_channels: Number of channels in latent representation (1, 3, 64, etc.)
+            output_channels: Number of output channels (1 for grayscale, 3 for RGB)
+        """
         super(Decoder, self).__init__()
+        self.latent_channels = latent_channels
+        self.output_channels = output_channels
+        
+        # Intermediate channel size (can be adjusted)
+        mid_channels = max(32, latent_channels)
+        
         self.up1 = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=3, padding=1),
+            nn.Conv2d(latent_channels, mid_channels, kernel_size=3, padding=1),
             nn.ReLU(True),
-            nn.BatchNorm2d(32)
+            nn.BatchNorm2d(mid_channels)
         ) 
         self.up2 = nn.Sequential(
-            nn.Conv2d(32, 32, kernel_size=3, padding=1),
+            nn.Conv2d(mid_channels, 32, kernel_size=3, padding=1),
             nn.ReLU(True),
             nn.BatchNorm2d(32)
         )  
@@ -57,10 +80,11 @@ class Decoder(nn.Module):
             nn.ReLU(True),
             nn.BatchNorm2d(16)
         ) 
-        self.final_conv = nn.Conv2d(16, 1, kernel_size=3, padding=1)
+        self.final_conv = nn.Conv2d(16, output_channels, kernel_size=3, padding=1)
         self.out_act = nn.Sigmoid() 
+        
     def forward(self, x):
-        # x shape (B, 1, 28, 28)
+        # x shape (B, latent_channels, 28, 28)
         x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)  
         x = self.up1(x)
         x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False) 
@@ -72,10 +96,25 @@ class Decoder(nn.Module):
 
 
 class Autoencoder(nn.Module):
-    def __init__(self):
+    def __init__(self, input_channels=1, latent_channels=1, output_channels=None):
+        """
+        Flexible Autoencoder that can work with different channel configurations.
+        
+        Args:
+            input_channels: Number of input channels (1 for grayscale, 3 for RGB)
+            latent_channels: Number of channels in latent space (1, 3, 64, etc.)
+            output_channels: Number of output channels (if None, uses input_channels)
+        """
         super(Autoencoder, self).__init__()
-        self.encoder = Encoder()
-        self.decoder = Decoder()
+        if output_channels is None:
+            output_channels = input_channels
+            
+        self.input_channels = input_channels
+        self.latent_channels = latent_channels
+        self.output_channels = output_channels
+        
+        self.encoder = Encoder(input_channels=input_channels, latent_channels=latent_channels)
+        self.decoder = Decoder(latent_channels=latent_channels, output_channels=output_channels)
 
     def forward(self, x):
         latent = self.encoder(x)
@@ -87,6 +126,94 @@ class Autoencoder(nn.Module):
     
     def decode(self, x):
         return self.decoder(x)
+
+def detect_autoencoder_architecture(state_dict):
+    """
+    Detect the architecture parameters from a saved autoencoder state dict.
+    
+    Args:
+        state_dict: The state dictionary from a saved autoencoder
+        
+    Returns:
+        dict: Architecture parameters (input_channels, latent_channels, output_channels)
+    """
+    # Default values
+    arch = {
+        'input_channels': 1,
+        'latent_channels': 1,
+        'output_channels': 1
+    }
+    
+    # Detect input channels from first encoder layer
+    if 'encoder.encoder.0.weight' in state_dict:
+        # Shape: [out_channels, in_channels, k, k]
+        weight_shape = state_dict['encoder.encoder.0.weight'].shape
+        arch['input_channels'] = weight_shape[1]  # in_channels
+    
+    # Detect latent channels from last encoder conv layer (before final pooling)
+    # encoder.encoder.10 is the last conv layer
+    if 'encoder.encoder.10.weight' in state_dict:
+        # Shape: [out_channels, in_channels, k, k]
+        weight_shape = state_dict['encoder.encoder.10.weight'].shape
+        arch['latent_channels'] = weight_shape[0]  # out_channels
+    
+    # Detect output channels from final decoder layer
+    if 'decoder.final_conv.weight' in state_dict:
+        # Shape: [out_channels, in_channels, k, k]
+        weight_shape = state_dict['decoder.final_conv.weight'].shape
+        arch['output_channels'] = weight_shape[0]  # out_channels
+    
+    return arch
+
+def load_autoencoder_from_checkpoint(checkpoint_path, device='cpu', verbose=True):
+    """
+    Load an autoencoder from checkpoint, automatically detecting architecture.
+    
+    Args:
+        checkpoint_path: Path to the saved autoencoder checkpoint
+        device: Device to load the model on
+        verbose: Whether to print loading information
+        
+    Returns:
+        Autoencoder: Loaded autoencoder model
+    """
+    # Load state dict
+    state = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    state_dict = state.get("state_dict", state)
+    
+    # Detect architecture
+    arch = detect_autoencoder_architecture(state_dict)
+    
+    if verbose:
+        print(f"Detected autoencoder architecture:")
+        print(f"  Input channels: {arch['input_channels']}")
+        print(f"  Latent channels: {arch['latent_channels']}")
+        print(f"  Output channels: {arch['output_channels']}")
+    
+    # Create autoencoder with detected architecture
+    autoencoder = Autoencoder(
+        input_channels=arch['input_channels'],
+        latent_channels=arch['latent_channels'],
+        output_channels=arch['output_channels']
+    )
+    
+    # Load weights
+    try:
+        autoencoder.load_state_dict(state_dict, strict=True)
+        if verbose:
+            print(f"✓ Successfully loaded all weights from checkpoint")
+    except RuntimeError as e:
+        if verbose:
+            print(f"⚠ Warning: Some weights couldn't be loaded strictly")
+            print(f"  Error: {str(e)[:200]}...")
+        # Try loading with strict=False
+        missing, unexpected = autoencoder.load_state_dict(state_dict, strict=False)
+        if verbose and missing:
+            print(f"  Missing keys: {len(missing)}")
+        if verbose and unexpected:
+            print(f"  Unexpected keys: {len(unexpected)}")
+    
+    return autoencoder
 
 def setup_device():
     if torch.cuda.is_available():
