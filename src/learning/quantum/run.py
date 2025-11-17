@@ -12,7 +12,7 @@ from src.utils.training import (
     extract_and_save_features,
     training_loop
 )
-from src.models.preprocessing.autoencoder import Autoencoder
+from src.models.preprocessing.autoencoder import Autoencoder, load_autoencoder_from_checkpoint
 from src.models.main.quantum import QuantumModel, QuantumModelWithEncoder
 
 
@@ -21,13 +21,13 @@ def main():
     parser.add_argument('--extract', action='store_true', help='Extract features and save to experiments dirs')
     parser.add_argument('--encoder', action='store_true', help='Use QuantumModelWithEncoder')
     parser.add_argument('--load-best', action='store_true', help='Load best model weights before extracting/training')
-    parser.add_argument('--mode', type=str, default='2d', choices=['2d', '1d-sequential', 'hybrid'],
-                        help='Quanvolution mode: 2d (default, efficient), 1d-sequential (legacy), or hybrid')
+    parser.add_argument('--mode', type=str, default='2d', choices=['2d', '1d', 'hybrid'],
+                        help='Quanvolution mode: 2d (default, efficient), 1d (legacy), or hybrid')
     parser.add_argument('--stride', type=int, default=None,
                         help='Stride for 2D quanvolution. If None, uses patch_size (non-overlapping)')
     args = parser.parse_args()
 
-    autoencoder_path = "/home/eflammere/HybridEmbeddingsForBreastCancerDetection/experiments/models/autoencoder/autoencoder.pth"
+    autoencoder_path = "/home/eflammere/HybridEmbeddingsForBreastCancerDetection/experiments/models/autoencoder1/autoencoder1.pth"
     device = setup_device()
     directories = setup_directories()
 
@@ -49,28 +49,41 @@ def main():
         "patch_size": 4
     }
 
-    loader = BreastMNISTLoader(batch_size=common_hyperparams["batch_size"], image_size=224)
-    train_loader, test_loader, val_loader = loader.get_dataloaders()
-    dataloader = {"train": train_loader, "val": val_loader, "test": test_loader}
-
+    # Load autoencoder first to determine input channels
     encoder_module = None
+    input_channels = 1  # Default: grayscale
+    
     if args.encoder and autoencoder_path:
-        try:
-            ae = Autoencoder()
-        except TypeError:
-            ae = Autoencoder(input_channels=1, img_size=28)
-        state = torch.load(autoencoder_path, map_location="cpu", weights_only=True)
-        state_dict = state.get("state_dict", state)
-        try:
-            ae.load_state_dict(state_dict)
-        except Exception:
-            ae.load_state_dict(state_dict, strict=False)
+        print(f"\nLoading autoencoder from: {autoencoder_path}")
+        
+        # Use the automatic loader that detects architecture
+        ae = load_autoencoder_from_checkpoint(
+            checkpoint_path=autoencoder_path,
+            device=device,
+            verbose=True
+        )
+        
+        # Get the input channels from the loaded autoencoder
+        input_channels = ae.input_channels
+        print(f"Using {input_channels}-channel input to match autoencoder")
+        
         ae.eval()
         encoder_module = ae
         for p in encoder_module.parameters():
             p.requires_grad = False
-        encoder_module.to(device)
-        print(f"Autoencoder loaded from {autoencoder_path}")
+        
+        print(f"✓ Autoencoder ready for feature extraction\n")
+    
+    # Create dataloader with appropriate number of channels
+    use_rgb = (input_channels == 3)
+    loader = BreastMNISTLoader(
+        batch_size=common_hyperparams["batch_size"], 
+        image_size=224,
+        use_rgb=use_rgb
+    )
+    print(f"Dataloader configured for {'RGB (3 channels)' if use_rgb else 'Grayscale (1 channel)'}")
+    train_loader, test_loader, val_loader = loader.get_dataloaders()
+    dataloader = {"train": train_loader, "val": val_loader, "test": test_loader}
 
     if args.encoder:
         quantum_model = QuantumModelWithEncoder(

@@ -25,16 +25,19 @@ class QuanvLayer(nn.Module):
         self.mode = mode
         self.stride = stride if stride is not None else patch_size
 
-        self.dev = qml.device("lightning.gpu", wires=n_qubits)
+        self.dev = qml.device("lightning.qubit", wires=n_qubits)
 
         def circuit(inputs, weights):
-            # Data re-uploading for better expressivity
+            # Data embedding
             qml.AngleEmbedding(inputs, wires=range(n_qubits), rotation="Y")
-            qml.RandomLayers(weights, wires=range(n_qubits))
+            # Variational layers using RandomLayers
+            qml.templates.layers.RandomLayers(weights, wires=range(n_qubits))
             return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
 
-        weight_shapes = {"weights": (n_layers, n_qubits, 3)}
+        # RandomLayers expects shape (n_layers, n_qubits) not (n_layers, n_qubits, 3)
+        weight_shapes = {"weights": (n_layers, n_qubits)}
         self.qnode = qml.QNode(circuit, self.dev, interface="torch", diff_method="adjoint")
+        self.qlayer = qml.qnn.TorchLayer(self.qnode, weight_shapes)
         self.qlayer = qml.qnn.TorchLayer(self.qnode, weight_shapes)
 
     def calculate_output_shape(self, h, w):
@@ -167,6 +170,11 @@ class QuanvLayer(nn.Module):
         B, C, H, W = x.shape
         p = self.patch_size
         s = self.stride
+        
+        # Handle multi-channel input by averaging or taking first channel
+        if C > 1:
+            x = x.mean(dim=1, keepdim=True)  # Average across channels
+            C = 1
         
         # Calculate padding needed
         pad_h = (p - (H % p)) % p if (H % p) != 0 else 0
