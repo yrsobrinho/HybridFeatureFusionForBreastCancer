@@ -30,7 +30,7 @@ class QuanvLayer(nn.Module):
         def circuit(inputs, weights):
             # Data re-uploading for better expressivity
             qml.AngleEmbedding(inputs, wires=range(n_qubits), rotation="Y")
-            qml.StronglyEntanglingLayers(weights, wires=range(n_qubits))
+            qml.RandomLayers(weights, wires=range(n_qubits))
             return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
 
         weight_shapes = {"weights": (n_layers, n_qubits, 3)}
