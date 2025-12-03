@@ -27,7 +27,7 @@ def main():
                         help='Stride for 2D quanvolution. If None, uses patch_size (non-overlapping)')
     parser.add_argument('--dataset', type=str, default='breastmnist', choices=['breastmnist', 'bcdr'],
                         help='Dataset to use: breastmnist (default) or bcdr')
-    parser.add_argument('--bcdr_root', type=str, default='data/BCDR',
+    parser.add_argument('--bcdr_root', type=str, default='src/data',
                         help='Root directory for BCDR dataset (used with --dataset bcdr)')
     args = parser.parse_args()
 
