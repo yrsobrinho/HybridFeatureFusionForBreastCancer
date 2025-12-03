@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from src.utils.common import setup_device, setup_directories
-from src.utils.dataloader import BreastMNISTLoader
+from src.utils.dataloader import BreastMNISTLoader, BCDRLoader
 from src.utils.training import (
     training_loop,
     test_model,
@@ -27,6 +27,10 @@ def main():
     parser.add_argument('--encoder_path', type=str, 
                         default='/home/eflammere/HybridEmbeddingsForBreastCancerDetection/experiments/models/autoencoder3/autoencoder3.pth',
                         help='Path to autoencoder checkpoint (used with --shallow --encoder)')
+    parser.add_argument('--dataset', type=str, default='breastmnist', choices=['breastmnist', 'bcdr'],
+                        help='Dataset to use: breastmnist (default) or bcdr')
+    parser.add_argument('--bcdr_root', type=str, default='data/BCDR',
+                        help='Root directory for BCDR dataset (used with --dataset bcdr)')
     args = parser.parse_args()
 
     device = setup_device()
@@ -87,14 +91,29 @@ def main():
         "batch_size": 16 if args.shallow else 8,  # Shallow can handle larger batches
         "num_classes": 2,
         "learning_rate": 1e-3,
-        "model_type": f"{model_type}_{'encoder' if args.encoder else 'no_encoder'}"
+        "model_type": f"{model_type}_{'encoder' if args.encoder else 'no_encoder'}",
+        "dataset": args.dataset
     }
 
-    loader = BreastMNISTLoader(
-        batch_size=common_hyperparams["batch_size"], 
-        image_size=224,
-        use_rgb=use_rgb
-    )
+    # Create dataloader based on dataset choice
+    print(f"\n[Loading Dataset: {args.dataset.upper()}]")
+    if args.dataset == 'bcdr':
+        loader = BCDRLoader(
+            batch_size=common_hyperparams["batch_size"], 
+            image_size=224,
+            use_rgb=use_rgb,
+            root_dir=args.bcdr_root
+        )
+        print(f"BCDR dataset from: {args.bcdr_root}")
+    else:
+        loader = BreastMNISTLoader(
+            batch_size=common_hyperparams["batch_size"], 
+            image_size=224,
+            use_rgb=use_rgb
+        )
+        print(f"BreastMNIST dataset")
+    
+    print(f"Dataloader mode: {'RGB (3 channels)' if use_rgb else 'Grayscale (1 channel)'}")
     train_loader, test_loader, val_loader = loader.get_dataloaders()
 
     # Create model based on flags

@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from src.utils.common import setup_device, setup_directories
-from src.utils.dataloader import BreastMNISTLoader
+from src.utils.dataloader import BreastMNISTLoader, BCDRLoader
 from src.utils.training import (
     train_epoch,
     validate_model,
@@ -25,6 +25,10 @@ def main():
                         help='Quanvolution mode: 2d (default, efficient), 1d (legacy), or hybrid')
     parser.add_argument('--stride', type=int, default=None,
                         help='Stride for 2D quanvolution. If None, uses patch_size (non-overlapping)')
+    parser.add_argument('--dataset', type=str, default='breastmnist', choices=['breastmnist', 'bcdr'],
+                        help='Dataset to use: breastmnist (default) or bcdr')
+    parser.add_argument('--bcdr_root', type=str, default='data/BCDR',
+                        help='Root directory for BCDR dataset (used with --dataset bcdr)')
     args = parser.parse_args()
 
     autoencoder_path = "/home/eflammere/HybridEmbeddingsForBreastCancerDetection/experiments/models/autoencoder1/autoencoder1.pth"
@@ -40,6 +44,7 @@ def main():
         "epochs": 10,
         "batch_size": 8,
         "num_classes": 2,
+        "dataset": args.dataset
     }
 
     quantum_hyperparams = {
@@ -49,21 +54,18 @@ def main():
         "patch_size": 4
     }
 
-    # Load autoencoder first to determine input channels
     encoder_module = None
-    input_channels = 1  # Default: grayscale
+    input_channels = 1 
     
     if args.encoder and autoencoder_path:
         print(f"\nLoading autoencoder from: {autoencoder_path}")
         
-        # Use the automatic loader that detects architecture
         ae = load_autoencoder_from_checkpoint(
             checkpoint_path=autoencoder_path,
             device=device,
             verbose=True
         )
-        
-        # Get the input channels from the loaded autoencoder
+
         input_channels = ae.input_channels
         print(f"Using {input_channels}-channel input to match autoencoder")
         
@@ -74,13 +76,25 @@ def main():
         
         print(f"✓ Autoencoder ready for feature extraction\n")
     
-    # Create dataloader with appropriate number of channels
     use_rgb = (input_channels == 3)
-    loader = BreastMNISTLoader(
-        batch_size=common_hyperparams["batch_size"], 
-        image_size=224,
-        use_rgb=use_rgb
-    )
+    
+    print(f"\n[Loading Dataset: {args.dataset.upper()}]")
+    if args.dataset == 'bcdr':
+        loader = BCDRLoader(
+            batch_size=common_hyperparams["batch_size"], 
+            image_size=224,
+            use_rgb=use_rgb,
+            root_dir=args.bcdr_root
+        )
+        print(f"BCDR dataset from: {args.bcdr_root}")
+    else:
+        loader = BreastMNISTLoader(
+            batch_size=common_hyperparams["batch_size"], 
+            image_size=224,
+            use_rgb=use_rgb
+        )
+        print(f"BreastMNIST dataset")
+    
     print(f"Dataloader configured for {'RGB (3 channels)' if use_rgb else 'Grayscale (1 channel)'}")
     train_loader, test_loader, val_loader = loader.get_dataloaders()
     dataloader = {"train": train_loader, "val": val_loader, "test": test_loader}
@@ -166,10 +180,8 @@ def main():
         lr=quantum_hyperparams["learning_rate"]
     )
 
-    # Determine save directory based on encoder usage
     save_dir = encoder_model_dir if args.encoder else no_encoder_model_dir
     
-    # Run training loop
     history = training_loop(
         model=quantum_model,
         train_loader=dataloader["train"],
@@ -197,7 +209,6 @@ def main():
 
     hyperparams_for_logging = {**common_hyperparams, **quantum_hyperparams, "encoder_loaded": encoder_module is not None}
 
-    # Test the model
     test_results = test_model(
         model=quantum_model,
         dataloader=dataloader["test"],
