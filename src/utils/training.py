@@ -1,6 +1,3 @@
-"""
-Centralized training, validation, and testing utilities for all models.
-"""
 import os
 import datetime
 import numpy as np
@@ -19,20 +16,6 @@ import matplotlib.pyplot as plt
 
 
 def train_epoch(model, dataloader, criterion, optimizer, device, extract_features=False):
-    """
-    Train model for one epoch.
-    
-    Args:
-        model: PyTorch model with either forward() or extract_features()/classify_from_flat() methods
-        dataloader: Training data loader
-        criterion: Loss function
-        optimizer: Optimizer
-        device: Device to run on
-        extract_features: If True, use extract_features/classify_from_flat pattern
-        
-    Returns:
-        tuple: (epoch_loss, epoch_accuracy)
-    """
     model.train()
     running_loss = 0.0
     correct = 0
@@ -46,11 +29,9 @@ def train_epoch(model, dataloader, criterion, optimizer, device, extract_feature
         optimizer.zero_grad()
         
         if extract_features:
-            # For quantum models with two-stage forward pass
             feats = model.extract_features(images)
             outputs = model.classify_from_flat(feats)
         else:
-            # For standard models
             outputs = model(images)
         
         loss = criterion(outputs, labels)
@@ -62,7 +43,6 @@ def train_epoch(model, dataloader, criterion, optimizer, device, extract_feature
         correct += (preds == labels).sum().item()
         total += labels.size(0)
         
-        # Update progress bar
         pbar.set_postfix({
             "loss": running_loss / (pbar.n + 1),
             "acc": correct / total
@@ -75,19 +55,6 @@ def train_epoch(model, dataloader, criterion, optimizer, device, extract_feature
 
 
 def validate_model(model, dataloader, criterion, device, extract_features=False):
-    """
-    Validate model on validation/test set.
-    
-    Args:
-        model: PyTorch model
-        dataloader: Validation/test data loader
-        criterion: Loss function
-        device: Device to run on
-        extract_features: If True, use extract_features/classify_from_flat pattern
-        
-    Returns:
-        tuple: (loss, accuracy, precision, recall, f1, auc)
-    """
     model.eval()
     total_loss = 0.0
     all_labels = []
@@ -107,14 +74,12 @@ def validate_model(model, dataloader, criterion, device, extract_features=False)
             
             loss = criterion(outputs, labels)
             total_loss += loss.item()
-            
-            # Get probabilities for class 1
+
             probs = torch.softmax(outputs, dim=1)[:, 1].cpu().numpy() if outputs.shape[1] > 1 else torch.softmax(outputs, dim=1)[:, 0].cpu().numpy()
             all_probs.extend(probs)
             all_predictions.extend(outputs.argmax(dim=1).cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
-    
-    # Calculate metrics
+
     accuracy = accuracy_score(all_labels, all_predictions)
     precision = precision_score(all_labels, all_predictions, zero_division=0)
     recall = recall_score(all_labels, all_predictions, zero_division=0)
@@ -132,22 +97,6 @@ def validate_model(model, dataloader, criterion, device, extract_features=False)
 def test_model(model, dataloader, criterion, device, hyperparams, 
                output_file="test_results.txt", extract_features=False, 
                compute_detailed_metrics=True):
-    """
-    Test model and save comprehensive results.
-    
-    Args:
-        model: PyTorch model
-        dataloader: Test data loader
-        criterion: Loss function
-        device: Device to run on
-        hyperparams: Dictionary of hyperparameters to log
-        output_file: Path to save results
-        extract_features: If True, use extract_features/classify_from_flat pattern
-        compute_detailed_metrics: If True, compute macro/micro metrics
-        
-    Returns:
-        tuple: (loss, accuracy, precision, recall, f1, auc)
-    """
     model.eval()
     total_loss = 0.0
     all_labels = []
@@ -172,22 +121,18 @@ def test_model(model, dataloader, criterion, device, hyperparams,
             all_probs.extend(probs)
             all_predictions.extend(outputs.argmax(dim=1).cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
-    
-    # Calculate basic metrics
+
     accuracy = accuracy_score(all_labels, all_predictions)
     precision = precision_score(all_labels, all_predictions, zero_division=0)
     recall = recall_score(all_labels, all_predictions, zero_division=0)
     f1 = f1_score(all_labels, all_predictions, zero_division=0)
     
-    # Calculate confusion matrix elements
     tp = sum(1 for true, pred in zip(all_labels, all_predictions) if true == 1 and pred == 1)
     tn = sum(1 for true, pred in zip(all_labels, all_predictions) if true == 0 and pred == 0)
     fp = sum(1 for true, pred in zip(all_labels, all_predictions) if true == 0 and pred == 1)
     fn = sum(1 for true, pred in zip(all_labels, all_predictions) if true == 1 and pred == 0)
     
-    # Compute detailed metrics if requested
     if compute_detailed_metrics:
-        # Manual macro metrics
         precision_0 = tn / (tn + fn) if (tn + fn) > 0 else 0.0
         recall_0 = tn / (tn + fp) if (tn + fp) > 0 else 0.0
         f1_0 = 2 * (precision_0 * recall_0) / (precision_0 + recall_0) if (precision_0 + recall_0) > 0 else 0.0
@@ -200,7 +145,6 @@ def test_model(model, dataloader, criterion, device, hyperparams,
         recall_macro = (recall_0 + recall_1) / 2
         f1_macro = (f1_0 + f1_1) / 2
         
-        # Manual micro metrics
         total_tp = tp + tn
         total_fp_fn = fp + fn
         precision_micro = total_tp / (total_tp + total_fp_fn) if (total_tp + total_fp_fn) > 0 else 0.0
@@ -214,7 +158,6 @@ def test_model(model, dataloader, criterion, device, hyperparams,
     
     avg_loss = total_loss / len(dataloader)
     
-    # Save results to file
     with open(output_file, "a") as f:
         f.write(f"\n[Model Testing - {datetime.datetime.now()}]\n")
         f.write(f"Hyperparameters: {hyperparams}\n")
@@ -247,17 +190,6 @@ def test_model(model, dataloader, criterion, device, hyperparams,
 
 
 def extract_and_save_features(model, dataloader, device, output_dir, split_name, extract_features=False):
-    """
-    Extract features from a model and save to disk.
-    
-    Args:
-        model: PyTorch model with extract_features() method
-        dataloader: Data loader
-        device: Device to run on
-        output_dir: Directory to save features
-        split_name: Name of split (train/val/test)
-        extract_features: If True, use model.extract_features(), else use model(x)
-    """
     os.makedirs(output_dir, exist_ok=True)
     model.eval()
     
@@ -301,15 +233,6 @@ def extract_and_save_features(model, dataloader, device, output_dir, split_name,
 
 
 def plot_roc_curve(labels, probs, save_path, title="ROC Curve"):
-    """
-    Plot and save ROC curve.
-    
-    Args:
-        labels: True labels
-        probs: Predicted probabilities
-        save_path: Path to save the plot
-        title: Plot title
-    """
     try:
         auc = roc_auc_score(labels, probs)
         fpr, tpr, thresholds = roc_curve(labels, probs)
@@ -332,16 +255,6 @@ def plot_roc_curve(labels, probs, save_path, title="ROC Curve"):
 
 
 def save_checkpoint(model, optimizer, epoch, val_acc, save_path):
-    """
-    Save model checkpoint with training state.
-    
-    Args:
-        model: PyTorch model
-        optimizer: Optimizer
-        epoch: Current epoch
-        val_acc: Validation accuracy
-        save_path: Path to save checkpoint
-    """
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     
     checkpoint = {
@@ -356,18 +269,6 @@ def save_checkpoint(model, optimizer, epoch, val_acc, save_path):
 
 
 def load_checkpoint(model, optimizer, checkpoint_path, device):
-    """
-    Load model checkpoint.
-    
-    Args:
-        model: PyTorch model
-        optimizer: Optimizer
-        checkpoint_path: Path to checkpoint
-        device: Device to load to
-        
-    Returns:
-        tuple: (epoch, val_acc) or (0, 0.0) if loading fails
-    """
     if not os.path.isfile(checkpoint_path):
         print(f"No checkpoint found at {checkpoint_path}")
         return 0, 0.0
@@ -387,12 +288,10 @@ def load_checkpoint(model, optimizer, checkpoint_path, device):
                 epoch = 0
                 val_acc = 0.0
             else:
-                # Assume it's just a state dict
                 model.load_state_dict(checkpoint)
                 epoch = 0
                 val_acc = 0.0
         else:
-            # Raw state dict
             model.load_state_dict(checkpoint)
             epoch = 0
             val_acc = 0.0
@@ -408,25 +307,6 @@ def load_checkpoint(model, optimizer, checkpoint_path, device):
 def training_loop(model, train_loader, val_loader, criterion, optimizer, device,
                   num_epochs, save_dir, model_name="model", extract_features=False,
                   save_best_only=True):
-    """
-    Complete training loop with validation and checkpointing.
-    
-    Args:
-        model: PyTorch model
-        train_loader: Training data loader
-        val_loader: Validation data loader
-        criterion: Loss function
-        optimizer: Optimizer
-        device: Device to run on
-        num_epochs: Number of epochs
-        save_dir: Directory to save model
-        model_name: Name for saved model files
-        extract_features: If True, use extract_features/classify_from_flat pattern
-        save_best_only: If True, only save best model, else save every epoch
-        
-    Returns:
-        dict: Training history with losses and metrics
-    """
     os.makedirs(save_dir, exist_ok=True)
     
     best_val_acc = 0.0
