@@ -30,10 +30,13 @@ def train_epoch(model, dataloader, criterion, optimizer, device, extract_feature
         
         if extract_features:
             feats = model.extract_features(images)
-            outputs = model.classify_from_flat(feats)
+            if hasattr(model, 'fc3'):
+                outputs = model.fc3(feats)
+            else:
+                outputs = model(images)
         else:
             outputs = model(images)
-        
+            
         loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
@@ -68,7 +71,10 @@ def validate_model(model, dataloader, criterion, device, extract_features=False)
             
             if extract_features:
                 feats = model.extract_features(images)
-                outputs = model.classify_from_flat(feats)
+                if hasattr(model, 'fc3'):
+                    outputs = model.fc3(feats)
+                else:
+                    outputs = model(images)
             else:
                 outputs = model(images)
             
@@ -110,7 +116,10 @@ def test_model(model, dataloader, criterion, device, hyperparams,
             
             if extract_features:
                 feats = model.extract_features(images)
-                outputs = model.classify_from_flat(feats)
+                if hasattr(model, 'fc3'):
+                    outputs = model.fc3(feats)
+                else:
+                    outputs = model(images)
             else:
                 outputs = model(images)
             

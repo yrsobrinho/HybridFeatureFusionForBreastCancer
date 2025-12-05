@@ -3,10 +3,9 @@ import sys
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from src.utils.dataloader import BreastMNISTLoader
+from src.utils.dataloader import BreastMNISTLoader, BCDRLoader
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-import numpy as np
 import torch.nn.functional as F
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -14,14 +13,7 @@ parent_dir = os.path.dirname(os.path.dirname(current_dir))
 sys.path.append(parent_dir)
 
 class Encoder(nn.Module):
-    def __init__(self, input_channels=1, latent_channels=1):
-        """
-        Flexible Encoder that can work with different channel configurations.
-        
-        Args:
-            input_channels: Number of input channels (1 for grayscale, 3 for RGB)
-            latent_channels: Number of channels in latent representation (1, 3, 64, etc.)
-        """
+    def __init__(self, input_channels=1, latent_channels=3):
         super(Encoder, self).__init__()
         self.input_channels = input_channels
         self.latent_channels = latent_channels
@@ -62,7 +54,6 @@ class Decoder(nn.Module):
         self.latent_channels = latent_channels
         self.output_channels = output_channels
         
-        # Intermediate channel size (can be adjusted)
         mid_channels = max(32, latent_channels)
         
         self.up1 = nn.Sequential(
@@ -84,7 +75,6 @@ class Decoder(nn.Module):
         self.out_act = nn.Sigmoid() 
         
     def forward(self, x):
-        # x shape (B, latent_channels, 28, 28)
         x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)  
         x = self.up1(x)
         x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False) 
@@ -97,14 +87,6 @@ class Decoder(nn.Module):
 
 class Autoencoder(nn.Module):
     def __init__(self, input_channels=1, latent_channels=1, output_channels=None):
-        """
-        Flexible Autoencoder that can work with different channel configurations.
-        
-        Args:
-            input_channels: Number of input channels (1 for grayscale, 3 for RGB)
-            latent_channels: Number of channels in latent space (1, 3, 64, etc.)
-            output_channels: Number of output channels (if None, uses input_channels)
-        """
         super(Autoencoder, self).__init__()
         if output_channels is None:
             output_channels = input_channels
@@ -126,94 +108,6 @@ class Autoencoder(nn.Module):
     
     def decode(self, x):
         return self.decoder(x)
-
-def detect_autoencoder_architecture(state_dict):
-    """
-    Detect the architecture parameters from a saved autoencoder state dict.
-    
-    Args:
-        state_dict: The state dictionary from a saved autoencoder
-        
-    Returns:
-        dict: Architecture parameters (input_channels, latent_channels, output_channels)
-    """
-    # Default values
-    arch = {
-        'input_channels': 1,
-        'latent_channels': 1,
-        'output_channels': 1
-    }
-    
-    # Detect input channels from first encoder layer
-    if 'encoder.encoder.0.weight' in state_dict:
-        # Shape: [out_channels, in_channels, k, k]
-        weight_shape = state_dict['encoder.encoder.0.weight'].shape
-        arch['input_channels'] = weight_shape[1]  # in_channels
-    
-    # Detect latent channels from last encoder conv layer (before final pooling)
-    # encoder.encoder.10 is the last conv layer
-    if 'encoder.encoder.10.weight' in state_dict:
-        # Shape: [out_channels, in_channels, k, k]
-        weight_shape = state_dict['encoder.encoder.10.weight'].shape
-        arch['latent_channels'] = weight_shape[0]  # out_channels
-    
-    # Detect output channels from final decoder layer
-    if 'decoder.final_conv.weight' in state_dict:
-        # Shape: [out_channels, in_channels, k, k]
-        weight_shape = state_dict['decoder.final_conv.weight'].shape
-        arch['output_channels'] = weight_shape[0]  # out_channels
-    
-    return arch
-
-def load_autoencoder_from_checkpoint(checkpoint_path, device='cpu', verbose=True):
-    """
-    Load an autoencoder from checkpoint, automatically detecting architecture.
-    
-    Args:
-        checkpoint_path: Path to the saved autoencoder checkpoint
-        device: Device to load the model on
-        verbose: Whether to print loading information
-        
-    Returns:
-        Autoencoder: Loaded autoencoder model
-    """
-    # Load state dict
-    state = torch.load(checkpoint_path, map_location=device, weights_only=True)
-    state_dict = state.get("state_dict", state)
-    
-    # Detect architecture
-    arch = detect_autoencoder_architecture(state_dict)
-    
-    if verbose:
-        print(f"Detected autoencoder architecture:")
-        print(f"  Input channels: {arch['input_channels']}")
-        print(f"  Latent channels: {arch['latent_channels']}")
-        print(f"  Output channels: {arch['output_channels']}")
-    
-    # Create autoencoder with detected architecture
-    autoencoder = Autoencoder(
-        input_channels=arch['input_channels'],
-        latent_channels=arch['latent_channels'],
-        output_channels=arch['output_channels']
-    )
-    
-    # Load weights
-    try:
-        autoencoder.load_state_dict(state_dict, strict=True)
-        if verbose:
-            print(f"✓ Successfully loaded all weights from checkpoint")
-    except RuntimeError as e:
-        if verbose:
-            print(f"⚠ Warning: Some weights couldn't be loaded strictly")
-            print(f"  Error: {str(e)[:200]}...")
-        # Try loading with strict=False
-        missing, unexpected = autoencoder.load_state_dict(state_dict, strict=False)
-        if verbose and missing:
-            print(f"  Missing keys: {len(missing)}")
-        if verbose and unexpected:
-            print(f"  Unexpected keys: {len(unexpected)}")
-    
-    return autoencoder
 
 def setup_device():
     if torch.cuda.is_available():
@@ -262,24 +156,20 @@ def train_autoencoder(model, train_loader, optimizer, device, num_epochs=10, log
         with tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}") as pbar:
             for i, (images, _) in enumerate(pbar):
                 images = images.to(device)
-                
-                # Forward pass
+
                 reconstructed, _ = model(images)
                 loss = criterion(reconstructed, images)
-                
-                # Backward and optimize
+
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-                
-                # Update statistics
+
                 running_loss += loss.item()
                 
                 if (i + 1) % log_interval == 0:
                     pbar.set_postfix(loss=f"{running_loss / log_interval:.6f}")
                     running_loss = 0.0
-        
-        # Compute epoch loss
+
         epoch_loss = compute_epoch_loss(model, train_loader, criterion, device)
         history["train_loss"].append(epoch_loss)
         print(f"Epoch {epoch+1}: Loss={epoch_loss:.6f}")
@@ -287,7 +177,6 @@ def train_autoencoder(model, train_loader, optimizer, device, num_epochs=10, log
     return history
 
 def compute_epoch_loss(model, dataloader, criterion, device):
-    """Compute the average loss over the entire dataset."""
     model.eval()
     total_loss = 0.0
     total_samples = 0
@@ -305,7 +194,6 @@ def compute_epoch_loss(model, dataloader, criterion, device):
     return total_loss / total_samples
 
 def visualize_reconstructions(model, test_loader, device, save_path):
-    """Generate and save visualizations of original and reconstructed images."""
     model.eval()
 
     images, _ = next(iter(test_loader))
@@ -337,20 +225,48 @@ def visualize_reconstructions(model, test_loader, device, save_path):
     print(f"Reconstruction visualization saved to {save_path}")
 
 def main():
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Train Autoencoder')
+    parser.add_argument('--dataset', type=str, default='breastmnist', choices=['breastmnist', 'bcdr'],
+                        help='Dataset to use: breastmnist (default) or bcdr')
+    parser.add_argument('--bcdr_root', type=str, default='src/data',
+                        help='Root directory for BCDR dataset (used with --dataset bcdr)')
+    parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
+    parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate')
+    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
+    args = parser.parse_args()
+    
     print("=== Setting up training environment ===")
     device = setup_device()
     directories = setup_directories()
     
     print("\n=== Configuring hyperparameters ===")
     hyperparams = {
-        "batch_size": 32,
-        "learning_rate": 1e-4,
-        "epochs": 500
+        "batch_size": args.batch_size,
+        "learning_rate": args.learning_rate,
+        "epochs": args.epochs,
+        "dataset": args.dataset
     }
     print(f"Hyperparameters: {hyperparams}")
     
-    print("\n=== Loading datasets ===")
-    loader = BreastMNISTLoader(batch_size=hyperparams["batch_size"], image_size=224)
+    print(f"\n=== Loading {args.dataset.upper()} dataset ===")
+    if args.dataset == 'bcdr':
+        loader = BCDRLoader(
+            batch_size=hyperparams["batch_size"], 
+            image_size=224,
+            root_dir=args.bcdr_root
+        )
+        dataset_name = 'bcdr'
+        print(f"BCDR dataset from: {args.bcdr_root}")
+    else:
+        loader = BreastMNISTLoader(
+            batch_size=hyperparams["batch_size"], 
+            image_size=224
+        )
+        dataset_name = 'breastmnist'
+        print("BreastMNIST dataset")
+    
     train_loader, test_loader, val_loader = loader.get_dataloaders()
     print(f"Dataset loaded with {len(train_loader)} training batches, {len(val_loader)} validation batches, {len(test_loader)} test batches")
     
@@ -384,7 +300,7 @@ def main():
     )
     
     print("\n=== Saving model ===")
-    model_path = os.path.join(directories["autoencoder_dir"], "autoencoder1.pth")
+    model_path = os.path.join(directories["autoencoder_dir"], f"autoencoder_{dataset_name}.pth")
     torch.save(autoencoder.state_dict(), model_path)
     print(f"Model saved at {model_path}")
     

@@ -4,17 +4,6 @@ from src.utils.fusion import FusionMethods
 
 
 def fuse_and_save(quantum_features_path, classical_features_path, output_dir, methods=None):
-    """Load quantum and classical feature .npy files, apply fusion methods and save results.
-
-    Args:
-        quantum_features_path: path to numpy file with quantum features (N x Dq)
-        classical_features_path: path to numpy file with classical features (N x Dc)
-        output_dir: directory where fused features will be saved
-        methods: list of method names to run; defaults to ['concat','add','dot','attention','self_attention']
-        labels_path: optional path to labels .npy; if provided, labels will be copied to output_dir
-    Returns:
-        dict mapping method name to saved file path
-    """
     os.makedirs(output_dir, exist_ok=True)
 
     q = np.load(quantum_features_path)
@@ -51,7 +40,6 @@ def fuse_and_save(quantum_features_path, classical_features_path, output_dir, me
 
 
 def main():
-    """Small CLI to fuse two feature files. Edit paths below or import fuse_and_save."""
     import argparse
 
     parser = argparse.ArgumentParser(description="Fuse classical and quantum feature .npy files")

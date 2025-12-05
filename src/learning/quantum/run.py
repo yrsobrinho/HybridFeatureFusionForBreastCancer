@@ -12,7 +12,7 @@ from src.utils.training import (
     extract_and_save_features,
     training_loop
 )
-from src.models.preprocessing.autoencoder import Autoencoder, load_autoencoder_from_checkpoint
+from src.models.preprocessing.autoencoder import Autoencoder
 from src.models.main.quantum import QuantumModel, QuantumModelWithEncoder
 
 
@@ -21,7 +21,7 @@ def main():
     parser.add_argument('--extract', action='store_true', help='Extract features and save to experiments dirs')
     parser.add_argument('--encoder', action='store_true', help='Use QuantumModelWithEncoder')
     parser.add_argument('--load-best', action='store_true', help='Load best model weights before extracting/training')
-    parser.add_argument('--mode', type=str, default='2d', choices=['2d', '1d', 'hybrid'],
+    parser.add_argument('--mode', type=str, default='1d', choices=['2d', '1d', 'hybrid'],
                         help='Quanvolution mode: 2d (default, efficient), 1d (legacy), or hybrid')
     parser.add_argument('--stride', type=int, default=None,
                         help='Stride for 2D quanvolution. If None, uses patch_size (non-overlapping)')
@@ -31,12 +31,19 @@ def main():
                         help='Root directory for BCDR dataset (used with --dataset bcdr)')
     args = parser.parse_args()
 
-    autoencoder_path = "/home/eflammere/HybridEmbeddingsForBreastCancerDetection/experiments/models/autoencoder1/autoencoder1.pth"
     device = setup_device()
     directories = setup_directories()
 
-    encoder_model_dir = os.path.join(directories.get("quantum_model_dir", "."), "encoder")
-    no_encoder_model_dir = os.path.join(directories.get("quantum_model_dir", "."), "no-encoder")
+    # Create model directories based on dataset and encoder usage
+    base_models_dir = os.path.join(directories.get("project_dir", "."), "experiments", "models")
+    dataset_name = "BreastMNIST" if args.dataset == "breastmnist" else "BCDR"
+    dataset_model_dir = os.path.join(base_models_dir, dataset_name, "quantum")
+
+    autoencoder_path = f"/home/eflammere/HybridEmbeddingsForBreastCancerDetection/experiments/models/autoencoder/autoencoder_{args.dataset}.pth"
+    
+    encoder_model_dir = os.path.join(dataset_model_dir, "encoder")
+    no_encoder_model_dir = dataset_model_dir
+    
     os.makedirs(encoder_model_dir, exist_ok=True)
     os.makedirs(no_encoder_model_dir, exist_ok=True)
 
@@ -60,14 +67,15 @@ def main():
     if args.encoder and autoencoder_path:
         print(f"\nLoading autoencoder from: {autoencoder_path}")
         
-        ae = load_autoencoder_from_checkpoint(
-            checkpoint_path=autoencoder_path,
-            device=device,
-            verbose=True
-        )
-
-        input_channels = ae.input_channels
-        print(f"Using {input_channels}-channel input to match autoencoder")
+        # Load autoencoder directly
+        ae = Autoencoder(input_channels=1, latent_channels=1)
+        state = torch.load(autoencoder_path, map_location=device)
+        
+        # Handle different checkpoint formats
+        if isinstance(state, dict) and "state_dict" in state:
+            ae.load_state_dict(state["state_dict"])
+        else:
+            ae.load_state_dict(state)
         
         ae.eval()
         encoder_module = ae
@@ -76,14 +84,11 @@ def main():
         
         print(f"✓ Autoencoder ready for feature extraction\n")
     
-    use_rgb = (input_channels == 3)
-    
     print(f"\n[Loading Dataset: {args.dataset.upper()}]")
     if args.dataset == 'bcdr':
         loader = BCDRLoader(
             batch_size=common_hyperparams["batch_size"], 
             image_size=224,
-            use_rgb=use_rgb,
             root_dir=args.bcdr_root
         )
         print(f"BCDR dataset from: {args.bcdr_root}")
@@ -91,11 +96,10 @@ def main():
         loader = BreastMNISTLoader(
             batch_size=common_hyperparams["batch_size"], 
             image_size=224,
-            use_rgb=use_rgb
         )
         print(f"BreastMNIST dataset")
     
-    print(f"Dataloader configured for {'RGB (3 channels)' if use_rgb else 'Grayscale (1 channel)'}")
+    print(f"Dataloader configured for {'RGB (3 channels)' if input_channels == 3 else 'Grayscale (1 channel)'}")
     train_loader, test_loader, val_loader = loader.get_dataloaders()
     dataloader = {"train": train_loader, "val": val_loader, "test": test_loader}
 

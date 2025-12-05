@@ -15,7 +15,7 @@ class QuanvLayer(nn.Module):
         self.mode = mode
         self.stride = stride if stride is not None else patch_size
 
-        self.dev = qml.device("lightning.qubit", wires=n_qubits)
+        self.dev = qml.device("lightning.gpu", wires=n_qubits)
 
         def circuit(inputs, weights):
             qml.AngleEmbedding(inputs, wires=range(n_qubits), rotation="Y")
@@ -23,9 +23,12 @@ class QuanvLayer(nn.Module):
             return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
 
         weight_shapes = {"weights": (n_layers, n_qubits)}
-        self.qnode = qml.QNode(circuit, self.dev, interface="torch", diff_method="adjoint")
+        self.qnode = qml.QNode(circuit, self.dev, interface="torch")
         self.qlayer = qml.qnn.TorchLayer(self.qnode, weight_shapes)
         self.qlayer = qml.qnn.TorchLayer(self.qnode, weight_shapes)
+
+        print(f"Quantum layer has {sum(p.numel() for p in self.qlayer.parameters())} trainable parameters")
+        print(f"Requires grad: {all(p.requires_grad for p in self.qlayer.parameters())}")
 
     def calculate_output_shape(self, h, w):
         p = self.patch_size
@@ -269,10 +272,11 @@ class QuantumModelWithEncoder(nn.Module):
                 enc = F.interpolate(enc, size=(target, target), mode=mode, align_corners=False)
         return enc
 
-    def forward(self, x):
+    def _extract_features_internal(self, x):
+        """Internal feature extraction (used by both forward and extract_features)."""
         x = self._apply_encoder(x)
-        x = self.quanv(x) 
-        x = x.flatten(start_dim=1)  
+        x = self.quanv(x)
+        x = x.flatten(start_dim=1)
 
         if self.fc1 is None:
             in_features = x.shape[1]
@@ -292,33 +296,15 @@ class QuantumModelWithEncoder(nn.Module):
         x = F.relu(x)
         x = F.dropout(x, p=0.2, training=self.training)
         
+        return x
+    
+    def forward(self, x):
+        x = self._extract_features_internal(x)
         x = self.fc3(x)
-        return F.log_softmax(x, dim=1)
-
+        return x
+    
     def extract_features(self, x):
-        """Return 64-dim features (after fc2)."""
-        x = self._apply_encoder(x)
-        x = self.quanv(x)
-        x = x.flatten(start_dim=1)
-
-        if self.fc1 is None:
-            in_features = x.shape[1]
-            self.fc1 = nn.Linear(in_features, 128).to(x.device)
-            self.fc2 = nn.Linear(128, 64).to(x.device)
-            self.fc3 = nn.Linear(64, self.num_classes).to(x.device)
-
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        return x  # 64-dim features
-
-    def classify_from_flat(self, x):
-        """Classify from 64-dim features."""
-        if self.fc3 is None:
-            self.fc3 = nn.Linear(64, self.num_classes).to(x.device)
-        
-        out = self.fc3(x)
-        return F.log_softmax(out, dim=1)
-
+        return self._extract_features_internal(x)
 
 class QuantumModel(nn.Module):
     def __init__(self, n_qubits, n_layers, num_classes, patch_size, 
@@ -337,16 +323,13 @@ class QuantumModel(nn.Module):
         self.num_classes = num_classes
         self.mode = mode
         
-        # Initialize layers upfront
         self.fc1 = None
         self.fc2 = None
         self.fc3 = None
         self.bn1 = None
         self.bn2 = None
 
-    def forward(self, x):
-        if x.shape[1] != 1:
-            x = x.mean(dim=1, keepdim=True)
+    def _extract_features_internal(self, x):
         x = self.quanv(x)
         x = x.flatten(start_dim=1)
 
@@ -368,32 +351,13 @@ class QuantumModel(nn.Module):
         x = F.relu(x)
         x = F.dropout(x, p=0.2, training=self.training)
         
+        return x
+    
+    def forward(self, x):
+        x = self._extract_features_internal(x)
         x = self.fc3(x)
-        return F.log_softmax(x, dim=1)
-
+        return x
+    
     def extract_features(self, x):
-        if x.shape[1] != 1:
-            x = x.mean(dim=1, keepdim=True)
-        
-        x = self.quanv(x)
-        x = x.flatten(start_dim=1)
-
-        if self.fc1 is None:
-            in_features = x.shape[1]
-            self.fc1 = nn.Linear(in_features, 128).to(x.device)
-            self.bn1 = nn.BatchNorm1d(128).to(x.device)
-            self.fc2 = nn.Linear(128, 64).to(x.device)
-            self.bn2 = nn.BatchNorm1d(64).to(x.device)
-            self.fc3 = nn.Linear(64, self.num_classes).to(x.device)
-
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        return x 
-
-    def classify_from_flat(self, x):
-        if self.fc3 is None:
-            self.fc3 = nn.Linear(64, self.num_classes).to(x.device)
-        
-        out = self.fc3(x)
-        return F.log_softmax(out, dim=1)
+        return self._extract_features_internal(x)
 

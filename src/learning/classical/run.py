@@ -16,7 +16,7 @@ from src.models.main.classical import (
     ShallowCNN,
     ShallowCNNWithEncoder
 )
-from src.models.preprocessing.autoencoder import Autoencoder, load_autoencoder_from_checkpoint
+from src.models.preprocessing.autoencoder import Autoencoder
 
 def main():
     parser = argparse.ArgumentParser()
@@ -36,35 +36,36 @@ def main():
     device = setup_device()
     dirs = setup_directories()
 
-    # Determine model type and directory structure
-    if args.shallow:
-        model_type = "shallow"
-        encoder_model_dir = os.path.join(dirs.get("classical_model_dir", "."), "shallow", "encoder")
-        no_encoder_model_dir = os.path.join(dirs.get("classical_model_dir", "."), "shallow", "no-encoder")
-    else:
-        model_type = "resnet"
-        encoder_model_dir = os.path.join(dirs.get("classical_model_dir", "."), "encoder")
-        no_encoder_model_dir = os.path.join(dirs.get("classical_model_dir", "."), "no-encoder")
+    # Determine model type
+    model_type = "shallow" if args.shallow else "resnet"
     
-    os.makedirs(encoder_model_dir, exist_ok=True)
-    os.makedirs(no_encoder_model_dir, exist_ok=True)
+    # Create model directories based on dataset and encoder usage
+    # /experiments/models/{BreastMNIST|BCDR}/classical/encoder or /experiments/models/{BreastMNIST|BCDR}/classical
+    base_models_dir = os.path.join(dirs.get("project_dir", "."), "experiments", "models")
+    dataset_name = "BreastMNIST" if args.dataset == "breastmnist" else "BCDR"
+    dataset_model_dir = os.path.join(base_models_dir, dataset_name, "classical")
+    
+    if args.encoder:
+        encoder_model_dir = os.path.join(dataset_model_dir, "encoder", model_type)
+        no_encoder_model_dir = None  # Not used when encoder=True
+    else:
+        encoder_model_dir = None  # Not used when encoder=False
+        no_encoder_model_dir = os.path.join(dataset_model_dir, model_type)
+    
+    # Create the appropriate directory
+    save_dir = encoder_model_dir if args.encoder else no_encoder_model_dir
+    os.makedirs(save_dir, exist_ok=True)
 
-    # Handle encoder loading based on model type
     encoder_module = None
     use_rgb = False
     
     if args.encoder:
         if args.shallow:
-            # For shallow models, use the new flexible autoencoder loader
             print(f"[Loading Autoencoder from {args.encoder_path}]")
-            autoencoder = load_autoencoder_from_checkpoint(args.encoder_path)
-            encoder_module = autoencoder.encoder
-            use_rgb = (autoencoder.input_channels == 3)
-            encoder_output_size = 28  # Assume 28x28 output from encoder
+            encoder_output_size = 28 
             print(f"Dataloader mode: {'RGB (3 channels)' if use_rgb else 'Grayscale (1 channel)'}")
         else:
-            # For ResNet models, use the old hardcoded autoencoder
-            autoencoder_path = "/home/eflammere/HybridEmbeddingsForBreastCancerDetection/experiments/models/autoencoder/autoencoder.pth"
+            autoencoder_path = f"/home/eflammere/HybridEmbeddingsForBreastCancerDetection/experiments/models/autoencoder/autoencoder_{loader.dataset_name}.pth"
             try:
                 ae = Autoencoder()
             except TypeError:
@@ -150,9 +151,8 @@ def main():
     print(f"Trainable parameters: {trainable_params:,}")
 
     if args.load_best:
-        chosen_dir = encoder_model_dir if args.encoder else no_encoder_model_dir
         model_filename = f"best_{'shallow' if args.shallow else 'classical'}_model.pth"
-        model_path = os.path.join(chosen_dir, model_filename)
+        model_path = os.path.join(save_dir, model_filename)
         if os.path.isfile(model_path):
             state = torch.load(model_path, map_location=device)
             try:
@@ -198,7 +198,6 @@ def main():
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=common_hyperparams["learning_rate"])
 
-    save_dir = encoder_model_dir if args.encoder else no_encoder_model_dir
     model_name = f"{'shallow' if args.shallow else 'classical'}_model"
     
     # Run training loop
