@@ -25,10 +25,16 @@ def main():
                         help='Quanvolution mode: 2d (default, efficient), 1d (legacy), or hybrid')
     parser.add_argument('--stride', type=int, default=None,
                         help='Stride for 2D quanvolution. If None, uses patch_size (non-overlapping)')
+    parser.add_argument('--use-parallel', action='store_true',
+                        help='Use parallel processing for hybrid mode (processes H and V together)')
     parser.add_argument('--dataset', type=str, default='breastmnist', choices=['breastmnist', 'bcdr'],
                         help='Dataset to use: breastmnist (default) or bcdr')
     parser.add_argument('--bcdr_root', type=str, default='src/data',
                         help='Root directory for BCDR dataset (used with --dataset bcdr)')
+    parser.add_argument('--save-all-epochs', action='store_true',
+                        help='Save checkpoint at every epoch')
+    parser.add_argument('--save-frequency', type=int, default=1,
+                        help='Save checkpoint every N epochs (with --save-all-epochs)')
     args = parser.parse_args()
 
     device = setup_device()
@@ -49,7 +55,7 @@ def main():
 
     common_hyperparams = {
         "epochs": 10,
-        "batch_size": 8,
+        "batch_size": 16,
         "num_classes": 2,
         "dataset": args.dataset
     }
@@ -112,7 +118,8 @@ def main():
             encoder=encoder_module,
             encoder_output_size=28,
             mode=args.mode,
-            stride=args.stride
+            stride=args.stride,
+            use_parallel=args.use_parallel
         ).to(device)
     else:
         quantum_model = QuantumModel(
@@ -121,11 +128,14 @@ def main():
             num_classes=common_hyperparams["num_classes"],
             patch_size=quantum_hyperparams["patch_size"],
             mode=args.mode,
-            stride=args.stride
+            stride=args.stride,
+            use_parallel=args.use_parallel
         ).to(device)
     
     print(f"\nQuantum Model Configuration:")
     print(f"  Mode: {args.mode}")
+    if args.mode == "hybrid":
+        print(f"  Parallel processing: {args.use_parallel}")
     print(f"  Stride: {args.stride if args.stride else quantum_hyperparams['patch_size']} (default: patch_size)")
     print(f"  Patch size: {quantum_hyperparams['patch_size']}")
     print(f"  Qubits: {quantum_hyperparams['n_qubits']}")

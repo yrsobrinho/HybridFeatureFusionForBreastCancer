@@ -24,13 +24,14 @@ def main():
     parser.add_argument('--encoder', action='store_true', help='Use encoder-based model variant')
     parser.add_argument('--shallow', action='store_true', help='Use Shallow CNN (3 layers) instead of ResNet18')
     parser.add_argument('--load-best', action='store_true', help='Load best model weights before extracting')
-    parser.add_argument('--encoder_path', type=str, 
-                        default='/home/eflammere/HybridEmbeddingsForBreastCancerDetection/experiments/models/autoencoder3/autoencoder3.pth',
-                        help='Path to autoencoder checkpoint (used with --shallow --encoder)')
     parser.add_argument('--dataset', type=str, default='breastmnist', choices=['breastmnist', 'bcdr'],
                         help='Dataset to use: breastmnist (default) or bcdr')
     parser.add_argument('--bcdr_root', type=str, default='src/data',
                         help='Root directory for BCDR dataset (used with --dataset bcdr)')
+    parser.add_argument('--save-all-epochs', action='store_true',
+                        help='Save checkpoint at every epoch')
+    parser.add_argument('--save-frequency', type=int, default=1,
+                        help='Save checkpoint every N epochs (with --save-all-epochs)')
     args = parser.parse_args()
 
     device = setup_device()
@@ -213,7 +214,9 @@ def main():
         save_dir=save_dir,
         model_name=model_name,
         extract_features=False, 
-        save_best_only=True
+        save_best_only=not args.save_all_epochs,
+        save_all_epochs=args.save_all_epochs,
+        save_frequency=args.save_frequency
     )
     
     print("\n[Loading best model for final testing...]")
