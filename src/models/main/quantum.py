@@ -7,13 +7,14 @@ import torch.nn.functional as F
 import pennylane as qml
 
 class QuanvLayer(nn.Module):
-    def __init__(self, n_qubits, n_layers, patch_size, mode="2d", stride=None):
+    def __init__(self, n_qubits, n_layers, patch_size, mode="2d", stride=None, use_parallel=True):
         super().__init__()
         self.n_qubits = n_qubits
         self.n_layers = n_layers
         self.patch_size = patch_size
         self.mode = mode
         self.stride = stride if stride is not None else patch_size
+        self.use_parallel = use_parallel  # Flag para controlar paralelização
 
         self.dev = qml.device("lightning.gpu", wires=n_qubits)
 
@@ -136,6 +137,58 @@ class QuanvLayer(nn.Module):
         q_out = q_out.permute(0, 3, 2, 1)  
         
         return q_out
+    
+    def quanv1d_parallel(self, x):
+        """Processa horizontal e vertical em paralelo com ZERO overhead adicional"""
+        B, C, H, W = x.shape
+        p = self.patch_size
+    
+        # Padding unificado ANTES de separar
+        pad_w = (p - (W % p)) % p
+        pad_h = (p - (H % p)) % p
+        if pad_w > 0 or pad_h > 0:
+            x = F.pad(x, (0, pad_w, 0, pad_h), mode='constant', value=0.0)
+            B, C, H, W = x.shape
+    
+        # Extrair linha 0 uma única vez
+        x_single = x[:, 0, :, :]  # (B, H, W)
+        
+        # Preparar patches H e V de forma mais eficiente
+        rows = x_single.reshape(B * H, W)
+        cols = x_single.permute(0, 2, 1).reshape(B * W, H)
+        
+        # Processar patches em batch único
+        num_patches_h = W // p
+        num_patches_v = H // p
+        
+        # Reshape direto para patches
+        patches_h = rows[:, :num_patches_h * p].view(-1, p)
+        patches_v = cols[:, :num_patches_v * p].view(-1, p)
+        
+        # Ajustar dimensão para n_qubits
+        if p != self.n_qubits:
+            if p > self.n_qubits:
+                patches_h = patches_h[:, :self.n_qubits]
+                patches_v = patches_v[:, :self.n_qubits]
+            else:
+                pad_size = self.n_qubits - p
+                patches_h = F.pad(patches_h, (0, pad_size))
+                patches_v = F.pad(patches_v, (0, pad_size))
+        
+        # PARALELIZAÇÃO: Uma única passada pelo circuito quântico
+        all_patches = torch.cat([patches_h, patches_v], dim=0)
+        all_q_out = self.qlayer(all_patches)
+        
+        # Split eficiente dos resultados
+        total_h = patches_h.shape[0]
+        q_out_h = all_q_out[:total_h].view(B, H, num_patches_h, self.n_qubits)
+        q_out_v = all_q_out[total_h:].view(B, W, num_patches_v, self.n_qubits)
+        
+        # Permute para formato correto (B, n_qubits, H, W)
+        q_out_h = q_out_h.permute(0, 3, 1, 2)
+        q_out_v = q_out_v.permute(0, 3, 2, 1)
+        
+        return q_out_h, q_out_v
 
     def quanv2d(self, x):
         B, C, H, W = x.shape
@@ -186,16 +239,22 @@ class QuanvLayer(nn.Module):
             x = self.quanv1d_vertical(x)
             return x
         elif self.mode == "hybrid":
-            x_h = self.quanv1d_horizontal(x)
-            x_v = self.quanv1d_vertical(x)
+            # Processamento paralelo ou sequencial baseado em use_parallel
+            if self.use_parallel:
+                x_h, x_v = self.quanv1d_parallel(x)
+            else:
+                x_h = self.quanv1d_horizontal(x)
+                x_v = self.quanv1d_vertical(x)
+            
+            # Multiplicação matricial (deu bons resultados)
             return x_v @ x_h
         else:
-            raise ValueError(f"Unknown mode: {self.mode}. Use '2d', '1d-sequential', or 'hybrid'")
+            raise ValueError(f"Unknown mode: {self.mode}. Use '2d', '1d', or 'hybrid'")
 
 class QuantumModelWithEncoder(nn.Module):
     def __init__(self, n_qubits, n_layers, num_classes,
                  patch_size, encoder: nn.Module = None, encoder_output_size: int = 28,
-                 mode: str = "2d", stride: int = None):
+                 mode: str = "2d", stride: int = None, use_parallel: bool = True):
 
         super().__init__()
         self.encoder = encoder
@@ -205,7 +264,8 @@ class QuantumModelWithEncoder(nn.Module):
             n_layers=n_layers,
             patch_size=patch_size,
             mode=mode,
-            stride=stride
+            stride=stride,
+            use_parallel=use_parallel
         )
 
         self.patch_size = patch_size
@@ -308,7 +368,7 @@ class QuantumModelWithEncoder(nn.Module):
 
 class QuantumModel(nn.Module):
     def __init__(self, n_qubits, n_layers, num_classes, patch_size, 
-                 mode: str = "2d", stride: int = None):
+                 mode: str = "2d", stride: int = None, use_parallel: bool = True):
       
         super().__init__()
         self.quanv = QuanvLayer(
@@ -316,7 +376,8 @@ class QuantumModel(nn.Module):
             n_layers=n_layers, 
             patch_size=patch_size,
             mode=mode,
-            stride=stride
+            stride=stride,
+            use_parallel=use_parallel
         )
         self.patch_size = patch_size
         self.n_qubits = n_qubits
