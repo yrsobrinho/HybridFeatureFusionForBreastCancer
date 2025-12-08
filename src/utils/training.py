@@ -315,8 +315,21 @@ def load_checkpoint(model, optimizer, checkpoint_path, device):
 
 def training_loop(model, train_loader, val_loader, criterion, optimizer, device,
                   num_epochs, save_dir, model_name="model", extract_features=False,
-                  save_best_only=True):
+                  save_best_only=True, save_all_epochs=False, save_frequency=1):
+    """
+    Training loop with flexible checkpoint saving.
+    
+    Args:
+        save_best_only: If True, only saves the best model based on validation accuracy
+        save_all_epochs: If True, saves checkpoint at every epoch (overrides save_best_only)
+        save_frequency: Save checkpoint every N epochs (only used if save_all_epochs=True)
+    """
     os.makedirs(save_dir, exist_ok=True)
+    
+    # Create checkpoints subdirectory if saving all epochs
+    if save_all_epochs:
+        checkpoints_dir = os.path.join(save_dir, "checkpoints")
+        os.makedirs(checkpoints_dir, exist_ok=True)
     
     best_val_acc = 0.0
     history = {
@@ -356,14 +369,28 @@ def training_loop(model, train_loader, val_loader, criterion, optimizer, device,
               f"Precision: {val_prec:.4f}, Recall: {val_rec:.4f}, "
               f"F1: {val_f1:.4f}, AUC: {val_auc:.4f}")
 
-        if save_best_only:
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
-                model_path = os.path.join(save_dir, f"best_{model_name}.pth")
-                torch.save(model.state_dict(), model_path)
-                print(f"  ✓ New best model saved (val_acc: {best_val_acc:.4f}) at {model_path}")
-        else:
+        # Save best model
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            best_model_path = os.path.join(save_dir, f"best_{model_name}.pth")
+            torch.save(model.state_dict(), best_model_path)
+            print(f"  ✓ New best model saved (val_acc: {best_val_acc:.4f}) at {best_model_path}")
+        
+        # Save all epochs if requested
+        if save_all_epochs and (epoch + 1) % save_frequency == 0:
+            epoch_checkpoint_path = os.path.join(checkpoints_dir, f"{model_name}_epoch{epoch+1}.pth")
+            save_checkpoint(model, optimizer, epoch, val_acc, epoch_checkpoint_path)
+            print(f"  💾 Checkpoint saved at epoch {epoch+1}")
+        
+        # Legacy behavior: save_best_only=False saves all epochs
+        if not save_best_only and not save_all_epochs:
             model_path = os.path.join(save_dir, f"{model_name}_epoch{epoch+1}.pth")
             save_checkpoint(model, optimizer, epoch, val_acc, model_path)
+    
+    # Save final model
+    if save_all_epochs or not save_best_only:
+        final_model_path = os.path.join(save_dir, f"final_{model_name}.pth")
+        torch.save(model.state_dict(), final_model_path)
+        print(f"\n✓ Final model saved at {final_model_path}")
     
     return history
