@@ -125,10 +125,10 @@ def setup_directories():
     
     directories = {
         "project_dir": project_dir,
-        "experiment_dir": os.path.join(project_dir, "experiments", "separate"),
-        "features_dir": os.path.join(project_dir, "experiments", "separate", "features"),
-        "models_dir": os.path.join(project_dir, "experiments", "separate", "models"),
-        "results_dir": os.path.join(project_dir, "experiments", "separate", "results")
+        "experiment_dir": os.path.join(project_dir, "experiments"),
+        "features_dir": os.path.join(project_dir, "experiments", "features"),
+        "models_dir": os.path.join(project_dir, "experiments", "models"),
+        "results_dir": os.path.join(project_dir, "experiments", "results")
     }
     
     autoencoder_dir = os.path.join(directories["models_dir"], "autoencoder")
@@ -235,6 +235,7 @@ def main():
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
     parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
+    parser.add_argument('--latent_channels', type=int, default=3, help='Number of latent channels (1, 3, 64, etc.)')
     args = parser.parse_args()
     
     print("=== Setting up training environment ===")
@@ -246,6 +247,7 @@ def main():
         "batch_size": args.batch_size,
         "learning_rate": args.learning_rate,
         "epochs": args.epochs,
+        "latent_channels": args.latent_channels,
         "dataset": args.dataset
     }
     print(f"Hyperparameters: {hyperparams}")
@@ -271,7 +273,12 @@ def main():
     print(f"Dataset loaded with {len(train_loader)} training batches, {len(val_loader)} validation batches, {len(test_loader)} test batches")
     
     print("\n=== Initializing model ===")
-    autoencoder = Autoencoder().to(device)
+    autoencoder = Autoencoder(
+        input_channels=1,
+        latent_channels=args.latent_channels,
+        output_channels=1
+    ).to(device)
+    print(f"Autoencoder architecture: input_channels=1, latent_channels={args.latent_channels}, output_channels=1")
     print(f"Total trainable parameters: {count_parameters(autoencoder)}")
     
     print("\n=== Configuring optimizer ===")
@@ -300,7 +307,7 @@ def main():
     )
     
     print("\n=== Saving model ===")
-    model_path = os.path.join(directories["autoencoder_dir"], f"autoencoder_{dataset_name}.pth")
+    model_path = os.path.join(directories["autoencoder_dir"], f"autoencoder_{dataset_name}_latent{args.latent_channels}.pth")
     torch.save(autoencoder.state_dict(), model_path)
     print(f"Model saved at {model_path}")
     
