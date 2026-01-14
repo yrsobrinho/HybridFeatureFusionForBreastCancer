@@ -14,18 +14,21 @@ from src.utils.training import (
 )
 from src.models.preprocessing.autoencoder import Autoencoder
 from src.models.main.quantum import QuantumModel, QuantumModelWithEncoder
+from src.models.main.quantum_simple import SimpleQuantumModel, SimpleQuantumModelWithEncoder
+
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--extract', action='store_true', help='Extract features and save to experiments dirs')
     parser.add_argument('--encoder', action='store_true', help='Use QuantumModelWithEncoder')
+    parser.add_argument('--simple', action='store_true', help='Use simple quantum model (flatten + single FC)')
     parser.add_argument('--load-best', action='store_true', help='Load best model weights before extracting/training')
-    parser.add_argument('--mode', type=str, default='1d', choices=['2d', '1d', 'hybrid'],
+    parser.add_argument('--mode', type=str, default='hybrid', choices=['2d', '1d', 'hybrid'],
                         help='Quanvolution mode: 2d (default, efficient), 1d (legacy), or hybrid')
     parser.add_argument('--stride', type=int, default=None,
                         help='Stride for 2D quanvolution. If None, uses patch_size (non-overlapping)')
-    parser.add_argument('--use-parallel', action='store_true',
+    parser.add_argument('--use-parallel', action='store_false',
                         help='Use parallel processing for hybrid mode (processes H and V together)')
     parser.add_argument('--dataset', type=str, default='breastmnist', choices=['breastmnist', 'bcdr'],
                         help='Dataset to use: breastmnist (default) or bcdr')
@@ -35,17 +38,18 @@ def main():
                         help='Save checkpoint at every epoch')
     parser.add_argument('--save-frequency', type=int, default=1,
                         help='Save checkpoint every N epochs (with --save-all-epochs)')
+    parser.add_argument('--image-size', type=int, default=28,
+                        help='Image size to resize to (default: 28)')
     args = parser.parse_args()
 
     device = setup_device()
     directories = setup_directories()
 
-    # Create model directories based on dataset and encoder usage
     base_models_dir = os.path.join(directories.get("project_dir", "."), "experiments", "models")
     dataset_name = "BreastMNIST" if args.dataset == "breastmnist" else "BCDR"
     dataset_model_dir = os.path.join(base_models_dir, dataset_name, "quantum")
 
-    autoencoder_path = f"/home/eflammere/HybridEmbeddingsForBreastCancerDetection/experiments/models/autoencoder/autoencoder_{args.dataset}.pth"
+    autoencoder_path = f"experiments/models/autoencoder/autoencoder_testes_breastmnist_latent3.pth"
     
     encoder_model_dir = os.path.join(dataset_model_dir, "encoder")
     no_encoder_model_dir = dataset_model_dir
@@ -63,7 +67,7 @@ def main():
     quantum_hyperparams = {
         "n_qubits": 4,
         "n_layers": 1,
-        "learning_rate": 1e-2,
+        "learning_rate": 1e-1,
         "patch_size": 4
     }
 
@@ -72,12 +76,10 @@ def main():
     
     if args.encoder and autoencoder_path:
         print(f"\nLoading autoencoder from: {autoencoder_path}")
-        
-        # Load autoencoder directly
-        ae = Autoencoder(input_channels=1, latent_channels=1)
+
+        ae = Autoencoder(input_channels=1, latent_channels=3)
         state = torch.load(autoencoder_path, map_location=device)
-        
-        # Handle different checkpoint formats
+    
         if isinstance(state, dict) and "state_dict" in state:
             ae.load_state_dict(state["state_dict"])
         else:
@@ -94,14 +96,14 @@ def main():
     if args.dataset == 'bcdr':
         loader = BCDRLoader(
             batch_size=common_hyperparams["batch_size"], 
-            image_size=224,
+            image_size=args.image_size,
             root_dir=args.bcdr_root
         )
         print(f"BCDR dataset from: {args.bcdr_root}")
     else:
         loader = BreastMNISTLoader(
             batch_size=common_hyperparams["batch_size"], 
-            image_size=224,
+            image_size=args.image_size,
         )
         print(f"BreastMNIST dataset")
     
@@ -110,32 +112,60 @@ def main():
     dataloader = {"train": train_loader, "val": val_loader, "test": test_loader}
 
     if args.encoder:
-        quantum_model = QuantumModelWithEncoder(
-            n_qubits=quantum_hyperparams["n_qubits"],
-            n_layers=quantum_hyperparams["n_layers"],
-            num_classes=common_hyperparams["num_classes"],
-            patch_size=quantum_hyperparams["patch_size"],
-            encoder=encoder_module,
-            encoder_output_size=28,
-            mode=args.mode,
-            stride=args.stride,
-            use_parallel=args.use_parallel
-        ).to(device)
+        if args.simple:
+            quantum_model = SimpleQuantumModelWithEncoder(
+                n_qubits=quantum_hyperparams["n_qubits"],
+                n_layers=quantum_hyperparams["n_layers"],
+                num_classes=common_hyperparams["num_classes"],
+                patch_size=quantum_hyperparams["patch_size"],
+                encoder=encoder_module,
+                encoder_output_size=28,
+                mode=args.mode,
+                stride=args.stride,
+                use_parallel=args.use_parallel
+            ).to(device)
+        else:
+            quantum_model = QuantumModelWithEncoder(
+                n_qubits=quantum_hyperparams["n_qubits"],
+                n_layers=quantum_hyperparams["n_layers"],
+                num_classes=common_hyperparams["num_classes"],
+                patch_size=quantum_hyperparams["patch_size"],
+                encoder=encoder_module,
+                encoder_output_size=28,
+                mode=args.mode,
+                stride=args.stride,
+                use_parallel=args.use_parallel
+            ).to(device)
     else:
-        quantum_model = QuantumModel(
-            n_qubits=quantum_hyperparams["n_qubits"],
-            n_layers=quantum_hyperparams["n_layers"],
-            num_classes=common_hyperparams["num_classes"],
-            patch_size=quantum_hyperparams["patch_size"],
-            mode=args.mode,
-            stride=args.stride,
-            use_parallel=args.use_parallel
-        ).to(device)
+        if args.simple:
+            quantum_model = SimpleQuantumModel(
+                n_qubits=quantum_hyperparams["n_qubits"],
+                n_layers=quantum_hyperparams["n_layers"],
+                num_classes=common_hyperparams["num_classes"],
+                patch_size=quantum_hyperparams["patch_size"],
+                mode=args.mode,
+                stride=args.stride,
+                use_parallel=args.use_parallel
+            ).to(device)
+        else:
+            quantum_model = QuantumModel(
+                n_qubits=quantum_hyperparams["n_qubits"],
+                n_layers=quantum_hyperparams["n_layers"],
+                num_classes=common_hyperparams["num_classes"],
+                patch_size=quantum_hyperparams["patch_size"],
+                mode=args.mode,
+                stride=args.stride,
+                use_parallel=args.use_parallel
+            ).to(device)
     
     print(f"\nQuantum Model Configuration:")
+    print(f"  Architecture: {'Simple (Flatten + FC)' if args.simple else 'Complex (FC + BN + Dropout)'}")
     print(f"  Mode: {args.mode}")
     if args.mode == "hybrid":
-        print(f"  Parallel processing: {args.use_parallel}")
+        print(f"    Parallel processing: {args.use_parallel}")
+    print(f"  Encoder used: {'Yes' if args.encoder else 'No'}")
+    print(f"  Extraction mode: {'Yes' if args.extract else 'No'}")
+    print(f"    Dataset used: {args.dataset}")
     print(f"  Stride: {args.stride if args.stride else quantum_hyperparams['patch_size']} (default: patch_size)")
     print(f"  Patch size: {quantum_hyperparams['patch_size']}")
     print(f"  Qubits: {quantum_hyperparams['n_qubits']}")
@@ -207,7 +237,9 @@ def main():
         save_dir=save_dir,
         model_name="quantum_model",
         extract_features=True, 
-        save_best_only=True
+        save_best_only=not args.save_all_epochs,
+        save_all_epochs=args.save_all_epochs,
+        save_frequency=args.save_frequency
     )
 
  

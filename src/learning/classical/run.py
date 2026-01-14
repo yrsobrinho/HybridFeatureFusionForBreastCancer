@@ -37,23 +37,19 @@ def main():
     device = setup_device()
     dirs = setup_directories()
 
-    # Determine model type
     model_type = "shallow" if args.shallow else "resnet"
     
-    # Create model directories based on dataset and encoder usage
-    # /experiments/models/{BreastMNIST|BCDR}/classical/encoder or /experiments/models/{BreastMNIST|BCDR}/classical
     base_models_dir = os.path.join(dirs.get("project_dir", "."), "experiments", "models")
     dataset_name = "BreastMNIST" if args.dataset == "breastmnist" else "BCDR"
     dataset_model_dir = os.path.join(base_models_dir, dataset_name, "classical")
     
     if args.encoder:
         encoder_model_dir = os.path.join(dataset_model_dir, "encoder", model_type)
-        no_encoder_model_dir = None  # Not used when encoder=True
+        no_encoder_model_dir = None 
     else:
-        encoder_model_dir = None  # Not used when encoder=False
+        encoder_model_dir = None 
         no_encoder_model_dir = os.path.join(dataset_model_dir, model_type)
-    
-    # Create the appropriate directory
+
     save_dir = encoder_model_dir if args.encoder else no_encoder_model_dir
     os.makedirs(save_dir, exist_ok=True)
 
@@ -85,19 +81,18 @@ def main():
             for p in encoder_module.parameters():
                 p.requires_grad = False
             encoder_module.to(device)
-            encoder_output_size = 64  # ResNet expects 64
+            encoder_output_size = 64  
             print(f"Autoencoder loaded from {autoencoder_path}")
 
     common_hyperparams = {
-        "epochs": 20 if args.shallow else 1,  # Shallow trains faster, can do more epochs
-        "batch_size": 16 if args.shallow else 8,  # Shallow can handle larger batches
+        "epochs": 20 if args.shallow else 1,  
+        "batch_size": 16 if args.shallow else 8, 
         "num_classes": 2,
         "learning_rate": 1e-3,
         "model_type": f"{model_type}_{'encoder' if args.encoder else 'no_encoder'}",
         "dataset": args.dataset
     }
 
-    # Create dataloader based on dataset choice
     print(f"\n[Loading Dataset: {args.dataset.upper()}]")
     if args.dataset == 'bcdr':
         loader = BCDRLoader(

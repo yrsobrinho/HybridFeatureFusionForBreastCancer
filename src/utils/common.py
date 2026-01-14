@@ -14,7 +14,7 @@ def setup_device():
     return device
 
 def setup_directories():
-    base_path = "/home/eflammere/HybridEmbeddingsForBreastCancerDetection/experiments/separate"
+    base_path = "experiments/separate"
     directories = {
         "quantum_model_dir": f"{base_path}/best_models/quantum",
         "classical_model_dir": f"{base_path}/best_models/classical",

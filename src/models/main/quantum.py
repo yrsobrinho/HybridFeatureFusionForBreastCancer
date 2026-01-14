@@ -6,7 +6,173 @@ import torch.nn as nn
 import torch.nn.functional as F
 import pennylane as qml
 
-class QuanvLayer(nn.Module):
+class NonTrainableLayer:
+    def __init__(self, n_qubits, n_layers, rand_params):
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+        self.rand_params = rand_params
+        self.dev = qml.device("lightning.qubit", wires=n_qubits)
+        
+        @qml.qnode(self.dev, interface='torch')
+        def circuit(phi):
+            for j in range(n_qubits):
+                qml.RY(np.pi * phi[j], wires=j)
+            qml.templates.layers.RandomLayers(rand_params, list(range(n_qubits)))
+            return [qml.expval(qml.PauliZ(j)) for j in range(n_qubits)]
+        
+        self.circuit = circuit
+    
+    def __call__(self, phi):
+        return self.circuit(phi)
+
+class QuantumModel(nn.Module):
+    def __init__(self, n_qubits, n_layers, rand_params, output_size=(14, 14), 
+                 patch_size=2, num_classes=2):
+        super(QuantumModel, self).__init__()
+        self.output_size = output_size
+        self.patch_size = patch_size
+        self.n_qubits = n_qubits
+        self.num_classes = num_classes
+        
+        self.circuit = NonTrainableLayer(n_qubits, n_layers, rand_params)
+        
+        self.flatten = nn.Flatten()
+        self.fc = None 
+
+    def _quanvolution_single(self, image):
+        if image.ndim == 2:
+            image = np.expand_dims(image, axis=-1)
+        
+        height_patches = image.shape[0] // self.patch_size
+        width_patches = image.shape[1] // self.patch_size
+        
+        out = np.zeros((height_patches, width_patches, self.n_qubits))
+        
+        for j in range(height_patches):
+            for k in range(width_patches):
+                patch = []
+                for i in range(self.patch_size):
+                    for l in range(self.patch_size):
+                        if (j * self.patch_size + i < image.shape[0]) and (k * self.patch_size + l < image.shape[1]):
+                            patch.append(image[j * self.patch_size + i, k * self.patch_size + l, 0])
+                        else:
+                            patch.append(0)
+                
+                q_results = self.circuit(patch)
+                
+                for c in range(self.n_qubits):
+                    out[j, k, c] = q_results[c]
+        
+        return out
+
+    def _quanvolution_batch(self, images):
+        batch_size = images.shape[0]
+        processed = [
+            self._quanvolution_single(images[i].detach().cpu().numpy())
+            for i in range(batch_size)
+        ]
+        processed = np.array(processed)
+        return torch.tensor(processed, dtype=torch.float32).to(images.device)
+
+    def forward(self, x):
+        x = x.permute(0, 2, 3, 1)
+        x = self._quanvolution_batch(x)
+        x = torch.relu(x)
+        x = self.flatten(x)
+
+        if self.fc is None:
+            in_features = x.shape[1]
+            self.fc = nn.Linear(in_features, self.num_classes).to(x.device)
+        
+        x = self.fc(x)
+        return x
+
+class QuantumModelWithEncoder(nn.Module):
+    def __init__(self, autoencoder, n_qubits, n_layers, rand_params, latent_channels=3, 
+                 output_size=(14, 14), patch_size=2, num_classes=2):
+        super(QuantumModelWithEncoder, self).__init__()
+        self.latent_channels = latent_channels
+        self.output_size = output_size
+        self.patch_size = patch_size
+        self.n_qubits = n_qubits
+        self.num_classes = num_classes
+        
+        self.autoencoder = autoencoder
+        self.autoencoder.eval()
+        
+        for param in self.autoencoder.parameters():
+            param.requires_grad = False
+        
+        self.circuit = NonTrainableLayer(n_qubits, n_layers, rand_params)
+        
+        self.flatten = nn.Flatten()
+        self.fc = None 
+
+    def _quanvolution_single(self, image):
+        if image.ndim == 2:
+            image = np.expand_dims(image, axis=-1)
+        
+        height_patches = image.shape[0] // self.patch_size
+        width_patches = image.shape[1] // self.patch_size
+        
+        out = np.zeros((height_patches, width_patches, self.n_qubits))
+        
+        for j in range(height_patches):
+            for k in range(width_patches):
+                patch = []
+                for i in range(self.patch_size):
+                    for l in range(self.patch_size):
+                        if (j * self.patch_size + i < image.shape[0]) and (k * self.patch_size + l < image.shape[1]):
+                            patch.append(image[j * self.patch_size + i, k * self.patch_size + l, 0])
+                        else:
+                            patch.append(0)
+                
+                q_results = self.circuit(patch)
+                
+                for c in range(self.n_qubits):
+                    out[j, k, c] = q_results[c]
+        
+        return out
+
+    def _quanvolution_batch(self, images):
+        batch_size = images.shape[0]
+        processed = [
+            self._quanvolution_single(images[i].detach().cpu().numpy())
+            for i in range(batch_size)
+        ]
+        processed = np.array(processed)
+        return torch.tensor(processed, dtype=torch.float32).to(images.device)
+
+    def forward(self, x):
+        with torch.no_grad():
+            x = self.autoencoder.encode(x)
+        
+        # Resize encoder output to match expected size (e.g., 28x28)
+        # The encoder may output smaller images (e.g., 3x3), so we need to interpolate
+        target_size = 28  # Same as QuantumModel without encoder
+        _, _, h, w = x.shape
+        if h != target_size or w != target_size:
+            x = F.interpolate(x, size=(target_size, target_size), mode='bilinear', align_corners=False)
+        
+        # Average the 3 latent channels into 1 channel to match QuantumModel behavior
+        # This gives us (B, 1, 28, 28) instead of (B, 3, 28, 28)
+        x = x.mean(dim=1, keepdim=True)
+        
+        # Now process the single averaged channel
+        x = x.permute(0, 2, 3, 1)
+        x = self._quanvolution_batch(x)
+        
+        x = torch.relu(x)
+        x = self.flatten(x)
+
+        if self.fc is None:
+            in_features = x.shape[1]
+            self.fc = nn.Linear(in_features, self.num_classes).to(x.device)
+        
+        x = self.fc(x)
+        return x
+
+class TrainableLayer(nn.Module):
     def __init__(self, n_qubits, n_layers, patch_size, mode="2d", stride=None, use_parallel=True):
         super().__init__()
         self.n_qubits = n_qubits
@@ -14,9 +180,9 @@ class QuanvLayer(nn.Module):
         self.patch_size = patch_size
         self.mode = mode
         self.stride = stride if stride is not None else patch_size
-        self.use_parallel = use_parallel  # Flag para controlar paralelização
+        self.use_parallel = use_parallel
 
-        self.dev = qml.device("lightning.gpu", wires=n_qubits)
+        self.dev = qml.device("lightning.qubit", wires=n_qubits)
 
         def circuit(inputs, weights):
             qml.AngleEmbedding(inputs, wires=range(n_qubits), rotation="Y")
@@ -25,7 +191,6 @@ class QuanvLayer(nn.Module):
 
         weight_shapes = {"weights": (n_layers, n_qubits)}
         self.qnode = qml.QNode(circuit, self.dev, interface="torch")
-        self.qlayer = qml.qnn.TorchLayer(self.qnode, weight_shapes)
         self.qlayer = qml.qnn.TorchLayer(self.qnode, weight_shapes)
 
         print(f"Quantum layer has {sum(p.numel() for p in self.qlayer.parameters())} trainable parameters")
@@ -89,11 +254,10 @@ class QuanvLayer(nn.Module):
         
         return patches, num_patches
 
-    def quanv1d_horizontal(self, x):
+    def horizontal(self, x):
         B, C, H, W = x.shape
         p = self.patch_size
 
-        # Pad once
         pad_w = (p - (W % p)) % p
         pad_h = (p - (H % p)) % p
         if pad_w > 0 or pad_h > 0:
@@ -104,7 +268,6 @@ class QuanvLayer(nn.Module):
         
         rows = x[:, 0, :, :].reshape(B * H, W)
         
-        # Prepare all patches at once
         patches, num_patches = self._prepare_patches(rows, W)
         
         q_out = self.qlayer(patches) 
@@ -115,11 +278,10 @@ class QuanvLayer(nn.Module):
         
         return q_out
 
-    def quanv1d_vertical(self, x):
+    def vertical(self, x):
         B, C, H, W = x.shape
         p = self.patch_size
 
-        # Pad once
         pad_h = (p - (H % p)) % p
         if pad_h > 0:
             x = F.pad(x, (0, 0, 0, pad_h), mode='constant', value=0.0)
@@ -138,34 +300,27 @@ class QuanvLayer(nn.Module):
         
         return q_out
     
-    def quanv1d_parallel(self, x):
-        """Processa horizontal e vertical em paralelo com ZERO overhead adicional"""
+    def parallel(self, x):
         B, C, H, W = x.shape
         p = self.patch_size
-    
-        # Padding unificado ANTES de separar
+
         pad_w = (p - (W % p)) % p
         pad_h = (p - (H % p)) % p
         if pad_w > 0 or pad_h > 0:
             x = F.pad(x, (0, pad_w, 0, pad_h), mode='constant', value=0.0)
             B, C, H, W = x.shape
-    
-        # Extrair linha 0 uma única vez
-        x_single = x[:, 0, :, :]  # (B, H, W)
-        
-        # Preparar patches H e V de forma mais eficiente
+
+        x_single = x[:, 0, :, :]  
+
         rows = x_single.reshape(B * H, W)
         cols = x_single.permute(0, 2, 1).reshape(B * W, H)
-        
-        # Processar patches em batch único
+
         num_patches_h = W // p
         num_patches_v = H // p
-        
-        # Reshape direto para patches
-        patches_h = rows[:, :num_patches_h * p].view(-1, p)
-        patches_v = cols[:, :num_patches_v * p].view(-1, p)
-        
-        # Ajustar dimensão para n_qubits
+
+        patches_h = rows[:, :num_patches_h * p].reshape(-1, p)
+        patches_v = cols[:, :num_patches_v * p].reshape(-1, p)
+
         if p != self.n_qubits:
             if p > self.n_qubits:
                 patches_h = patches_h[:, :self.n_qubits]
@@ -174,17 +329,14 @@ class QuanvLayer(nn.Module):
                 pad_size = self.n_qubits - p
                 patches_h = F.pad(patches_h, (0, pad_size))
                 patches_v = F.pad(patches_v, (0, pad_size))
-        
-        # PARALELIZAÇÃO: Uma única passada pelo circuito quântico
+
         all_patches = torch.cat([patches_h, patches_v], dim=0)
         all_q_out = self.qlayer(all_patches)
-        
-        # Split eficiente dos resultados
+
         total_h = patches_h.shape[0]
         q_out_h = all_q_out[:total_h].view(B, H, num_patches_h, self.n_qubits)
         q_out_v = all_q_out[total_h:].view(B, W, num_patches_v, self.n_qubits)
-        
-        # Permute para formato correto (B, n_qubits, H, W)
+
         q_out_h = q_out_h.permute(0, 3, 1, 2)
         q_out_v = q_out_v.permute(0, 3, 2, 1)
         
@@ -234,24 +386,21 @@ class QuanvLayer(nn.Module):
     def forward(self, x):
         if self.mode == "2d":
             return self.quanv2d(x)
-        elif self.mode == "1d":
-            x = self.quanv1d_horizontal(x)
-            x = self.quanv1d_vertical(x)
+        elif self.mode == "sequential":
+            x = self.horizontal(x)
+            x = self.vertical(x)
             return x
-        elif self.mode == "hybrid":
-            # Processamento paralelo ou sequencial baseado em use_parallel
+        elif self.mode == "matmul":
             if self.use_parallel:
-                x_h, x_v = self.quanv1d_parallel(x)
+                x_h, x_v = self.parallel(x)
             else:
-                x_h = self.quanv1d_horizontal(x)
-                x_v = self.quanv1d_vertical(x)
-            
-            # Multiplicação matricial (deu bons resultados)
+                x_h = self.horizontal(x)
+                x_v = self.vertical(x)
             return x_v @ x_h
         else:
-            raise ValueError(f"Unknown mode: {self.mode}. Use '2d', '1d', or 'hybrid'")
+            raise ValueError(f"Unknown mode: {self.mode}. Use '2d', 'sequential', or 'matmul'")
 
-class QuantumModelWithEncoder(nn.Module):
+class ExtentedQuantumModelWithEncoder(nn.Module):
     def __init__(self, n_qubits, n_layers, num_classes,
                  patch_size, encoder: nn.Module = None, encoder_output_size: int = 28,
                  mode: str = "2d", stride: int = None, use_parallel: bool = True):
@@ -259,7 +408,7 @@ class QuantumModelWithEncoder(nn.Module):
         super().__init__()
         self.encoder = encoder
 
-        self.quanv = QuanvLayer(
+        self.quanv = TrainableLayer(
             n_qubits=n_qubits,
             n_layers=n_layers,
             patch_size=patch_size,
@@ -315,12 +464,12 @@ class QuantumModelWithEncoder(nn.Module):
         elif enc.ndim == 3:
             enc = enc.unsqueeze(1)
         elif enc.ndim == 2:
-            B, F = enc.shape
-            s = int(math.sqrt(F))
-            if s * s == F:
+            B, feature_dim = enc.shape
+            s = int(math.sqrt(feature_dim))
+            if s * s == feature_dim:
                 enc = enc.view(B, 1, s, s)
             else:
-                enc = enc.view(B, 1, 1, F)
+                enc = enc.view(B, 1, 1, feature_dim)
         else:
             raise RuntimeError(f"Unsupported encoder output ndim={enc.ndim}")
 
@@ -332,8 +481,7 @@ class QuantumModelWithEncoder(nn.Module):
                 enc = F.interpolate(enc, size=(target, target), mode=mode, align_corners=False)
         return enc
 
-    def _extract_features_internal(self, x):
-        """Internal feature extraction (used by both forward and extract_features)."""
+    def forward(self, x):
         x = self._apply_encoder(x)
         x = self.quanv(x)
         x = x.flatten(start_dim=1)
@@ -356,22 +504,140 @@ class QuantumModelWithEncoder(nn.Module):
         x = F.relu(x)
         x = F.dropout(x, p=0.2, training=self.training)
         
-        return x
-    
-    def forward(self, x):
-        x = self._extract_features_internal(x)
         x = self.fc3(x)
         return x
-    
-    def extract_features(self, x):
-        return self._extract_features_internal(x)
 
-class QuantumModel(nn.Module):
+class SimpleQuantumModel(nn.Module):
+    """Trainable quantum circuit without encoder - minimal classical layers (1 FC)"""
+    def __init__(self, n_qubits, n_layers, num_classes, patch_size, 
+                 mode: str = "2d", stride: int = None, use_parallel: bool = True):
+        super().__init__()
+        self.quanv = TrainableLayer(
+            n_qubits=n_qubits, 
+            n_layers=n_layers, 
+            patch_size=patch_size,
+            mode=mode,
+            stride=stride,
+            use_parallel=use_parallel
+        )
+        self.patch_size = patch_size
+        self.n_qubits = n_qubits
+        self.num_classes = num_classes
+        self.mode = mode
+        
+        self.fc = None  # Single FC layer
+
+    def forward(self, x):
+        x = self.quanv(x)
+        x = x.flatten(start_dim=1)
+
+        if self.fc is None:
+            in_features = x.shape[1]
+            self.fc = nn.Linear(in_features, self.num_classes).to(x.device)
+
+        x = self.fc(x)
+        return x
+
+
+class SimpleQuantumModelWithEncoder(nn.Module):
+    """Trainable quantum circuit with encoder - minimal classical layers (1 FC)"""
+    def __init__(self, n_qubits, n_layers, num_classes,
+                 patch_size, encoder: nn.Module = None, encoder_output_size: int = 28,
+                 mode: str = "2d", stride: int = None, use_parallel: bool = True):
+        super().__init__()
+        self.encoder = encoder
+
+        self.quanv = TrainableLayer(
+            n_qubits=n_qubits,
+            n_layers=n_layers,
+            patch_size=patch_size,
+            mode=mode,
+            stride=stride,
+            use_parallel=use_parallel
+        )
+
+        self.patch_size = patch_size
+        self.n_qubits = n_qubits
+        self.num_classes = num_classes
+        self.encoder_output_size = encoder_output_size
+        self.mode = mode
+
+        output_shape, self.expected_features = self.quanv.calculate_output_shape(
+            encoder_output_size, encoder_output_size
+        )
+    
+        self.fc = None  # Single FC layer
+
+    def _apply_encoder(self, x):
+        if self.encoder is None:
+            return x
+        enc = None
+
+        if hasattr(self.encoder, "encode"):
+            with torch.no_grad():
+                enc = self.encoder.encode(x)
+        elif hasattr(self.encoder, "encoder"):
+            try:
+                with torch.no_grad():
+                    enc = self.encoder.encoder(x)
+            except Exception:
+                with torch.no_grad():
+                    enc = self.encoder(x)
+        else:
+            with torch.no_grad():
+                out = self.encoder(x)
+            if isinstance(out, (tuple, list)) and len(out) > 1:
+                enc = out[1]
+            else:
+                enc = out
+
+        if enc is None:
+            raise RuntimeError("Encoder returned None")
+
+        enc = enc.detach().float()
+
+        if enc.ndim == 4:
+            enc = enc
+        elif enc.ndim == 3:
+            enc = enc.unsqueeze(1)
+        elif enc.ndim == 2:
+            B, feature_dim = enc.shape
+            s = int(math.sqrt(feature_dim))
+            if s * s == feature_dim:
+                enc = enc.view(B, 1, s, s)
+            else:
+                enc = enc.view(B, 1, 1, feature_dim)
+        else:
+            raise RuntimeError(f"Unsupported encoder output ndim={enc.ndim}")
+
+        if self.encoder_output_size is not None:
+            target = self.encoder_output_size
+            _, _, h, w = enc.shape
+            if (h, w) != (target, target):
+                mode = 'bilinear' if h > 1 and w > 1 else 'bilinear'
+                enc = F.interpolate(enc, size=(target, target), mode=mode, align_corners=False)
+        return enc
+
+    def forward(self, x):
+        x = self._apply_encoder(x)
+        x = self.quanv(x)
+        x = x.flatten(start_dim=1)
+
+        if self.fc is None:
+            in_features = x.shape[1]
+            self.fc = nn.Linear(in_features, self.num_classes).to(x.device)
+
+        x = self.fc(x)
+        return x
+
+
+class ExtentedQuantumModel(nn.Module):
+    """Trainable quantum circuit without encoder - multiple classical layers"""
     def __init__(self, n_qubits, n_layers, num_classes, patch_size, 
                  mode: str = "2d", stride: int = None, use_parallel: bool = True):
       
         super().__init__()
-        self.quanv = QuanvLayer(
+        self.quanv = TrainableLayer(
             n_qubits=n_qubits, 
             n_layers=n_layers, 
             patch_size=patch_size,
@@ -390,7 +656,7 @@ class QuantumModel(nn.Module):
         self.bn1 = None
         self.bn2 = None
 
-    def _extract_features_internal(self, x):
+    def forward(self, x):
         x = self.quanv(x)
         x = x.flatten(start_dim=1)
 
@@ -412,13 +678,6 @@ class QuantumModel(nn.Module):
         x = F.relu(x)
         x = F.dropout(x, p=0.2, training=self.training)
         
-        return x
-    
-    def forward(self, x):
-        x = self._extract_features_internal(x)
         x = self.fc3(x)
         return x
-    
-    def extract_features(self, x):
-        return self._extract_features_internal(x)
 

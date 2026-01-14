@@ -3,7 +3,7 @@ import sys
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from src.utils.dataloader import BreastMNISTLoader, BCDRLoader
+from src.utils.dataloader import BreastMNISTLoader, BCDRLoader, BUSBRALoader, INbreastLoader
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
@@ -19,23 +19,50 @@ class Encoder(nn.Module):
         self.latent_channels = latent_channels
         
         self.encoder = nn.Sequential(
+            # Block 1: input_channels -> 16 (224x224 -> 112x112)
             nn.Conv2d(input_channels, 16, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(True),
+            nn.BatchNorm2d(16),
+            nn.Conv2d(16, 16, kernel_size=3, stride=1, padding=1),
             nn.ReLU(True),
             nn.MaxPool2d(2, 2),
             nn.BatchNorm2d(16),
             nn.Dropout(0.1),
 
+            # Block 2: 16 -> 32 (112x112 -> 56x56)
             nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(True),
+            nn.BatchNorm2d(32),
+            nn.Conv2d(32, 32, kernel_size=3, stride=1, padding=1),
             nn.ReLU(True),
             nn.MaxPool2d(2, 2),
             nn.BatchNorm2d(32),
             nn.Dropout(0.1),
 
-            nn.Conv2d(32, latent_channels, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(True), 
+            # Block 3: 32 -> 64 (56x56 -> 28x28)
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(True),
+            nn.BatchNorm2d(64),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(True),
             nn.MaxPool2d(2, 2),
-            nn.BatchNorm2d(latent_channels),
+            nn.BatchNorm2d(64),
             nn.Dropout(0.1),
+
+            # Block 4: 64 -> 128 (no pooling, stays 28x28)
+            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(True),
+            nn.BatchNorm2d(128),
+            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(True),
+            nn.BatchNorm2d(128),
+            nn.Dropout(0.1),
+
+            # Block 5: 128 -> latent_channels (no pooling, stays 28x28)
+            nn.Conv2d(128, latent_channels, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(True),
+            # nn.BatchNorm2d(latent_channels),
+            nn.Sigmoid(),
         )
         
     def forward(self, x):
@@ -54,34 +81,67 @@ class Decoder(nn.Module):
         self.latent_channels = latent_channels
         self.output_channels = output_channels
         
-        mid_channels = max(32, latent_channels)
-        
+        # Block 1: latent_channels -> 128 (stays 28x28)
         self.up1 = nn.Sequential(
-            nn.Conv2d(latent_channels, mid_channels, kernel_size=3, padding=1),
+            nn.Conv2d(latent_channels, 128, kernel_size=3, padding=1),
             nn.ReLU(True),
-            nn.BatchNorm2d(mid_channels)
-        ) 
+            nn.BatchNorm2d(128),
+            nn.Conv2d(128, 128, kernel_size=3, padding=1),
+            nn.ReLU(True),
+            nn.BatchNorm2d(128)
+        )
+        
+        # Block 2: 128 -> 64 (stays 28x28)
         self.up2 = nn.Sequential(
-            nn.Conv2d(mid_channels, 32, kernel_size=3, padding=1),
+            nn.Conv2d(128, 64, kernel_size=3, padding=1),
+            nn.ReLU(True),
+            nn.BatchNorm2d(64),
+            nn.Conv2d(64, 64, kernel_size=3, padding=1),
+            nn.ReLU(True),
+            nn.BatchNorm2d(64)
+        )
+        
+        # Block 3: 64 -> 32 (28x28 -> 56x56)
+        self.up3 = nn.Sequential(
+            nn.Conv2d(64, 32, kernel_size=3, padding=1),
+            nn.ReLU(True),
+            nn.BatchNorm2d(32),
+            nn.Conv2d(32, 32, kernel_size=3, padding=1),
             nn.ReLU(True),
             nn.BatchNorm2d(32)
-        )  
-        self.up3 = nn.Sequential(
+        )
+        
+        # Block 4: 32 -> 16 (56x56 -> 112x112)
+        self.up4 = nn.Sequential(
             nn.Conv2d(32, 16, kernel_size=3, padding=1),
             nn.ReLU(True),
+            nn.BatchNorm2d(16),
+            nn.Conv2d(16, 16, kernel_size=3, padding=1),
+            nn.ReLU(True),
             nn.BatchNorm2d(16)
-        ) 
+        )
+        
+        # Final layer: 16 -> output_channels (112x112 -> 224x224)
         self.final_conv = nn.Conv2d(16, output_channels, kernel_size=3, padding=1)
-        self.out_act = nn.Sigmoid() 
+        self.out_act = nn.Sigmoid()
         
     def forward(self, x):
-        x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)  
+        # 28x28 (no upsampling in first 2 blocks)
         x = self.up1(x)
-        x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False) 
         x = self.up2(x)
-        x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False) 
+        
+        # 28x28 -> 56x56
+        x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
         x = self.up3(x)
+        
+        # 56x56 -> 112x112
+        x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
+        x = self.up4(x)
+        
+        # 112x112 -> 224x224
+        x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
         x = self.final_conv(x)
+        
         return x
 
 
@@ -149,6 +209,7 @@ def train_autoencoder(model, train_loader, optimizer, device, num_epochs=10, log
     model.train()
     history = {"train_loss": []}
     criterion = lambda recon, x: 0.5 * nn.MSELoss()(recon, x) + 0.5 * nn.L1Loss()(recon, x)
+    scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9, verbose=True)
     
     for epoch in range(num_epochs):
         
@@ -169,7 +230,8 @@ def train_autoencoder(model, train_loader, optimizer, device, num_epochs=10, log
                 if (i + 1) % log_interval == 0:
                     pbar.set_postfix(loss=f"{running_loss / log_interval:.6f}")
                     running_loss = 0.0
-
+        if epoch % 50 == 0 and epoch != 0:
+            scheduler.step()
         epoch_loss = compute_epoch_loss(model, train_loader, criterion, device)
         history["train_loss"].append(epoch_loss)
         print(f"Epoch {epoch+1}: Loss={epoch_loss:.6f}")
@@ -200,24 +262,42 @@ def visualize_reconstructions(model, test_loader, device, save_path):
     
     with torch.no_grad():
         images = images.to(device)
-        reconstructed, _ = model(images)
+        reconstructed, latent = model(images)
+        # Downsample original para 28x28 para comparação
+        images_28 = F.interpolate(images, size=(28, 28), mode='bilinear', align_corners=False)
   
     images = images.cpu().numpy()
+    images_28 = images_28.cpu().numpy()
     reconstructed = reconstructed.cpu().numpy()
+    latent = latent.cpu().numpy()
     
 
     n = min(8, images.shape[0]) 
-    plt.figure(figsize=(20, 4))
+    plt.figure(figsize=(20, 8))
     
     for i in range(n):
-        ax = plt.subplot(2, n, i+1)
+        # Original image 224x224
+        ax = plt.subplot(4, n, i+1)
         plt.imshow(images[i][0], cmap='gray')
-        plt.title("Original")
+        plt.title("Original\n224x224")
+        plt.axis("off")
+        
+        # Original downsampled 28x28
+        ax = plt.subplot(4, n, i+1+n)
+        plt.imshow(images_28[i][0], cmap='gray')
+        plt.title("Original\n28x28")
         plt.axis("off")
  
-        ax = plt.subplot(2, n, i+1+n)
+        # Latent representation (28x28 - show first channel)
+        ax = plt.subplot(4, n, i+1+2*n)
+        plt.imshow(latent[i][0], cmap='gray')
+        plt.title(f"Latent\n{latent.shape[2]}x{latent.shape[3]}")
+        plt.axis("off")
+        
+        # Reconstructed image
+        ax = plt.subplot(4, n, i+1+3*n)
         plt.imshow(reconstructed[i][0], cmap='gray')
-        plt.title("Reconstructed")
+        plt.title("Reconstructed\n224x224")
         plt.axis("off")
     
     plt.tight_layout()
@@ -228,10 +308,14 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description='Train Autoencoder')
-    parser.add_argument('--dataset', type=str, default='breastmnist', choices=['breastmnist', 'bcdr'],
-                        help='Dataset to use: breastmnist (default) or bcdr')
-    parser.add_argument('--bcdr_root', type=str, default='src/data',
+    parser.add_argument('--dataset', type=str, default='inbreast', choices=['breastmnist', 'bcdr', 'busbra', 'inbreast'],
+                        help='Dataset to use: breastmnist (default), bcdr, busbra, or inbreast')
+    parser.add_argument('--bcdr_root', type=str, default='src/data/BCDR/png',
                         help='Root directory for BCDR dataset (used with --dataset bcdr)')
+    parser.add_argument('--busbra_root', type=str, default='src/data/BUSBRA/png',
+                        help='Root directory for BUSBRA dataset (used with --dataset busbra)')
+    parser.add_argument('--inbreast_root', type=str, default='src/data/INbreast/png',
+                        help='Root directory for INbreast dataset (used with --dataset inbreast)')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
     parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
@@ -261,6 +345,22 @@ def main():
         )
         dataset_name = 'bcdr'
         print(f"BCDR dataset from: {args.bcdr_root}")
+    elif args.dataset == 'busbra':
+        loader = BUSBRALoader(
+            batch_size=hyperparams["batch_size"], 
+            image_size=224,
+            root_dir=args.busbra_root
+        )
+        dataset_name = 'busbra'
+        print(f"BUSBRA dataset from: {args.busbra_root}")
+    elif args.dataset == 'inbreast':
+        loader = INbreastLoader(
+            batch_size=hyperparams["batch_size"], 
+            image_size=224,
+            root_dir=args.inbreast_root
+        )
+        dataset_name = 'inbreast'
+        print(f"INbreast dataset from: {args.inbreast_root}")
     else:
         loader = BreastMNISTLoader(
             batch_size=hyperparams["batch_size"], 
@@ -307,7 +407,7 @@ def main():
     )
     
     print("\n=== Saving model ===")
-    model_path = os.path.join(directories["autoencoder_dir"], f"autoencoder_{dataset_name}_latent{args.latent_channels}.pth")
+    model_path = os.path.join(directories["autoencoder_dir"], f"autoencoder_testes_{dataset_name}_latent{args.latent_channels}.pth")
     torch.save(autoencoder.state_dict(), model_path)
     print(f"Model saved at {model_path}")
     
