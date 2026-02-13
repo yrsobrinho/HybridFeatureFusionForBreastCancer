@@ -181,6 +181,7 @@ cython_debug/
 *.png
 *.txt
 *.npy
-experiments/separate/best_models/quantum/best_quantum_model.pth
-experiments/separate/best_models/classical/best_classical_model.pth
-src/learning/online.py
+*.json
+*.xlsx
+
+wip

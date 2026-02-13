@@ -1,6 +1,6 @@
 import os
 import numpy as np
-from src.utils.fusion import FusionMethods
+from src.models.fusion import FusionMethods
 
 
 def fuse_and_save(quantum_features_path, classical_features_path, output_dir, methods=None):
@@ -13,7 +13,7 @@ def fuse_and_save(quantum_features_path, classical_features_path, output_dir, me
         raise ValueError(f"Mismatched number of samples: quantum {q.shape[0]} vs classical {c.shape[0]}")
 
     if methods is None:
-        methods = ['concat', 'add', 'dot', 'attention', 'self_attention']
+        methods = ['concat', 'add', 'dot']
 
     fusion = FusionMethods()
     saved = {}
@@ -25,10 +25,6 @@ def fuse_and_save(quantum_features_path, classical_features_path, output_dir, me
             out = fusion.fuse_add(q, c)
         elif m == 'dot':
             out = fusion.fuse_dot(q, c)
-        elif m == 'attention':
-            out = fusion.fuse_attention(q, c)
-        elif m == 'self_attention':
-            out = fusion.fuse_self_attention(q, c)
         else:
             raise ValueError(f"Unknown fusion method: {m}")
 
@@ -50,10 +46,10 @@ def main():
     parser.add_argument('--labels', '-l', help='Optional labels .npy to copy to output dir', default=None)
 
     saved = fuse_and_save(
-    quantum_features_path='/home/eflammere/HybridEmbeddingsForBreastCancerDetection/experiments/features/quantum/train_features.npy',
-    classical_features_path='/home/eflammere/HybridEmbeddingsForBreastCancerDetection/experiments/features/classical/train_features.npy',
-    output_dir='/home/eflammere/HybridEmbeddingsForBreastCancerDetection/experiments/features/fused',
-    methods=['concat', 'add', 'dot', 'attention', 'self_attention'],
+    quantum_features_path='experiments/features/BUSUCLM/quantum/trainable/train_features.npy',
+    classical_features_path='experiments/features/BUSUCLM/classical/resnet/train_features.npy',
+    output_dir='experiments/features/BUSUCLM/fused/trainable_resnet',
+    methods=['concat', 'add', 'dot'],
 )
     print('Saved fused feature files:')
     for k, v in saved.items():

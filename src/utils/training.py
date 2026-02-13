@@ -380,7 +380,7 @@ def training_loop(model, train_loader, val_loader, criterion, optimizer, device,
         if save_all_epochs and (epoch + 1) % save_frequency == 0:
             epoch_checkpoint_path = os.path.join(checkpoints_dir, f"{model_name}_epoch{epoch+1}.pth")
             save_checkpoint(model, optimizer, epoch, val_acc, epoch_checkpoint_path)
-            print(f"  💾 Checkpoint saved at epoch {epoch+1}")
+            print(f"  Checkpoint saved at epoch {epoch+1}")
         
         # Legacy behavior: save_best_only=False saves all epochs
         if not save_best_only and not save_all_epochs:
