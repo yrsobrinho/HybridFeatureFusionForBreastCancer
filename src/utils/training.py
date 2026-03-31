@@ -21,6 +21,10 @@ def train_epoch(model, dataloader, criterion, optimizer, device, extract_feature
     correct = 0
     total = 0
     
+    if len(dataloader) == 0:
+        print("Warning: train dataloader is empty!")
+        return 0.0, 0.0
+    
     pbar = tqdm(dataloader, desc="Training", leave=False)
     for images, labels in pbar:
         images = images.to(device)
@@ -63,6 +67,10 @@ def validate_model(model, dataloader, criterion, device, extract_features=False)
     all_labels = []
     all_predictions = []
     all_probs = []
+    
+    if len(dataloader) == 0:
+        print("Warning: validation dataloader is empty!")
+        return 0.0, 0.0, 0.0, 0.0, 0.0, float('nan')
     
     with torch.no_grad():
         for images, labels in tqdm(dataloader, desc="Validation", leave=False):

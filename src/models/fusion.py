@@ -153,4 +153,209 @@ class FusionMethods:
 
         return pooled.detach().cpu().numpy()
 
-__all__ = ["FusionMethods"]
+
+class OnlineFusionModel(nn.Module):
+    """Online feature fusion model combining classical and quantum models.
+    
+    This model allows training both classical and quantum models jointly with
+    feature fusion at an intermediate stage. Features from both models are 
+    normalized, projected to the same dimension (default 128), concatenated,
+    and passed through fusion layers.
+    
+    Args:
+        classical_model: Classical model (ShallowCNN or ResNet)
+        quantum_model: Quantum model (QuantumModel or ExtentedQuantumModel)
+        feature_dim: Dimension to project features to before fusion (default: 128)
+        num_classes: Number of output classes (default: 2)
+        freeze_classical: Whether to freeze classical model weights (default: False)
+        freeze_quantum: Whether to freeze quantum model weights (default: False)
+    """
+    def __init__(self, classical_model, quantum_model, feature_dim=128, 
+                 num_classes=2, freeze_classical=False, freeze_quantum=False):
+        super(OnlineFusionModel, self).__init__()
+        
+        self.classical_model = classical_model
+        self.quantum_model = quantum_model
+        self.feature_dim = feature_dim
+        self.num_classes = num_classes
+        
+        # Freeze models if requested
+        if freeze_classical:
+            for param in self.classical_model.parameters():
+                param.requires_grad = False
+        
+        if freeze_quantum:
+            for param in self.quantum_model.parameters():
+                param.requires_grad = False
+        
+        # Projection heads (lazily initialized)
+        self.classical_projection = None
+        self.quantum_projection = None
+        
+        # Fusion layers
+        self.fusion_norm = nn.LayerNorm(feature_dim * 2)
+        self.fusion_relu = nn.ReLU()
+        self.fusion_fc = nn.Linear(feature_dim * 2, num_classes)
+        
+    def _init_projections(self, classical_dim, quantum_dim, device):
+        """Initialize projection heads based on actual feature dimensions."""
+        if self.classical_projection is None:
+            self.classical_projection = nn.Linear(classical_dim, self.feature_dim).to(device)
+        
+        if self.quantum_projection is None:
+            self.quantum_projection = nn.Linear(quantum_dim, self.feature_dim).to(device)
+    
+    def load_pretrained_weights(self, classical_path=None, quantum_path=None, device='cpu'):
+        """Load pretrained weights for classical and/or quantum models.
+        
+        Args:
+            classical_path: Path to classical model weights (.pth file)
+            quantum_path: Path to quantum model weights (.pth file)
+            device: Device to load weights to
+        """
+        if classical_path is not None:
+            try:
+                state_dict = torch.load(classical_path, map_location=device)
+                # Handle different checkpoint formats
+                if isinstance(state_dict, dict):
+                    if 'model_state_dict' in state_dict:
+                        state_dict = state_dict['model_state_dict']
+                    elif 'state_dict' in state_dict:
+                        state_dict = state_dict['state_dict']
+                
+                self.classical_model.load_state_dict(state_dict, strict=False)
+                print(f"✓ Loaded classical model weights from {classical_path}")
+            except Exception as e:
+                print(f"Warning: Could not load classical weights: {e}")
+        
+        if quantum_path is not None:
+            try:
+                state_dict = torch.load(quantum_path, map_location=device)
+                # Handle different checkpoint formats
+                if isinstance(state_dict, dict):
+                    if 'model_state_dict' in state_dict:
+                        state_dict = state_dict['model_state_dict']
+                    elif 'state_dict' in state_dict:
+                        state_dict = state_dict['state_dict']
+                
+                self.quantum_model.load_state_dict(state_dict, strict=False)
+                print(f"✓ Loaded quantum model weights from {quantum_path}")
+            except Exception as e:
+                print(f"Warning: Could not load quantum weights: {e}")
+    
+    def extract_features(self, x):
+        """Extract and fuse features from both models.
+        
+        Returns:
+            Fused features before final classification layer
+        """
+        # Extract features from both models
+        if hasattr(self.classical_model, 'extract_features'):
+            classical_feats = self.classical_model.extract_features(x)
+        else:
+            # If no extract_features, use forward pass and remove last layer
+            classical_feats = self.classical_model(x)
+        
+        if hasattr(self.quantum_model, 'extract_features'):
+            quantum_feats = self.quantum_model.extract_features(x)
+        else:
+            # For quantum models without extract_features, get output before fc
+            quantum_feats = self.quantum_model(x)
+        
+        # Ensure features are 2D [batch, features]
+        if classical_feats.ndim > 2:
+            classical_feats = classical_feats.flatten(start_dim=1)
+        if quantum_feats.ndim > 2:
+            quantum_feats = quantum_feats.flatten(start_dim=1)
+        
+        # Initialize projections if needed
+        if self.classical_projection is None or self.quantum_projection is None:
+            self._init_projections(classical_feats.shape[1], quantum_feats.shape[1], x.device)
+        
+        # Project to same dimension
+        classical_proj = self.classical_projection(classical_feats)
+        quantum_proj = self.quantum_projection(quantum_feats)
+        
+        # Normalize
+        classical_norm = F.normalize(classical_proj, p=2, dim=1)
+        quantum_norm = F.normalize(quantum_proj, p=2, dim=1)
+        
+        # Concatenate
+        fused = torch.cat([classical_norm, quantum_norm], dim=1)
+        
+        return fused
+    
+    def forward(self, x):
+        """Forward pass through the fusion model.
+        
+        Args:
+            x: Input images [batch, channels, height, width]
+        
+        Returns:
+            Class logits [batch, num_classes]
+        """
+        fused = self.extract_features(x)
+        
+        # Fusion layers
+        out = self.fusion_norm(fused)
+        out = self.fusion_relu(out)
+        out = self.fusion_fc(out)
+        
+        return out
+    
+    def forward_relu(self, x):
+        """Forward pass through the fusion model.
+        
+        Args:
+            x: Input images [batch, channels, height, width]
+        
+        Returns:
+            Class logits [batch, num_classes]
+        """
+        fused = self.extract_features(x)
+        
+        # Fusion layers
+        out = self.fusion_norm(fused)
+        out = self.fusion_relu(out)
+        
+        return out
+    
+    def get_parameter_groups(self, lr_classical=1e-4, lr_quantum=1e-3, lr_fusion=1e-3):
+        """Get parameter groups with different learning rates.
+        
+        Args:
+            lr_classical: Learning rate for classical model
+            lr_quantum: Learning rate for quantum model
+            lr_fusion: Learning rate for fusion layers (projections + fusion)
+        
+        Returns:
+            List of parameter groups for optimizer
+        """
+        param_groups = []
+        
+        # Classical model parameters
+        classical_params = [p for p in self.classical_model.parameters() if p.requires_grad]
+        if classical_params:
+            param_groups.append({'params': classical_params, 'lr': lr_classical})
+        
+        # Quantum model parameters
+        quantum_params = [p for p in self.quantum_model.parameters() if p.requires_grad]
+        if quantum_params:
+            param_groups.append({'params': quantum_params, 'lr': lr_quantum})
+        
+        # Fusion layers (projections + fusion layers)
+        fusion_params = []
+        if self.classical_projection is not None:
+            fusion_params.extend([p for p in self.classical_projection.parameters() if p.requires_grad])
+        if self.quantum_projection is not None:
+            fusion_params.extend([p for p in self.quantum_projection.parameters() if p.requires_grad])
+        fusion_params.extend([p for p in self.fusion_norm.parameters() if p.requires_grad])
+        fusion_params.extend([p for p in self.fusion_fc.parameters() if p.requires_grad])
+        
+        if fusion_params:
+            param_groups.append({'params': fusion_params, 'lr': lr_fusion})
+        
+        return param_groups
+
+
+__all__ = ["FusionMethods", "OnlineFusionModel"]

@@ -1,7 +1,12 @@
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+import numpy as np
+from torch.utils.data import DataLoader, TensorDataset
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+from utils.training import train_epoch, validate_model as validate_fn, test_model as test_fn
 
 class ClassificationModelHandler:
     def __init__(self, device, num_classes, sequential_hyperparams):
@@ -18,62 +23,89 @@ class ClassificationModelHandler:
         self.criterion = nn.CrossEntropyLoss()
 
     def train_model(self, train_loader):
-        self.model.train()
-        total_loss = 0.0
-        for features, labels in train_loader:
-            features, labels = features.to(self.device), labels.to(self.device)
-            self.optimizer.zero_grad()
-            outputs = self.model(features)
-            loss = self.criterion(outputs, labels)
-            loss.backward()
-            self.optimizer.step()
-            total_loss += loss.item()
-        return total_loss / len(train_loader)
+        """Train the model for one epoch using training.py utilities"""
+        epoch_loss, epoch_acc = train_epoch(
+            model=self.model,
+            dataloader=train_loader,
+            criterion=self.criterion,
+            optimizer=self.optimizer,
+            device=self.device,
+            extract_features=False
+        )
+        return epoch_loss
 
     def validate_model(self, val_loader):
-        self.model.eval()
-        val_loss = 0.0
-        all_labels = []
-        all_predictions = []
-        all_probs = []
-
-        with torch.no_grad():
-            for features, labels in val_loader:
-                features, labels = features.to(self.device), labels.to(self.device)
-                outputs = self.model(features)
-                loss = self.criterion(outputs, labels)
-                val_loss += loss.item()
-
-                all_labels.extend(labels.cpu().numpy())
-                all_predictions.extend(outputs.argmax(dim=1).cpu().numpy())
-                all_probs.extend(torch.softmax(outputs, dim=1)[:, 1].cpu().numpy())
-
+        """Validate the model using training.py utilities"""
+        val_loss, accuracy, precision, recall, f1, auc = validate_fn(
+            model=self.model,
+            dataloader=val_loader,
+            criterion=self.criterion,
+            device=self.device,
+            extract_features=False
+        )
+        
         metrics = {
-            'accuracy': accuracy_score(all_labels, all_predictions),
-            'precision': precision_score(all_labels, all_predictions, zero_division=0),
-            'recall': recall_score(all_labels, all_predictions, zero_division=0),
-            'f1': f1_score(all_labels, all_predictions, zero_division=0),
-            'auc': roc_auc_score(all_labels, all_probs) if len(set(all_labels)) > 1 else float('nan')
+            'accuracy': accuracy,
+            'precision': precision,
+            'recall': recall,
+            'f1': f1,
+            'auc': auc
         }
-        return val_loss / len(val_loader), metrics
+        return val_loss, metrics
 
     def test_model(self, test_loader, output_file, method_name):
+        """Test the model using training.py utilities"""
+        hyperparams = {
+            'method': method_name,
+            'input_dim': self.sequential_hyperparams['input_dim'],
+            'learning_rate': self.sequential_hyperparams['learning_rate'],
+            'num_classes': self.num_classes
+        }
+        
+        test_fn(
+            model=self.model,
+            dataloader=test_loader,
+            criterion=self.criterion,
+            device=self.device,
+            hyperparams=hyperparams,
+            output_file=output_file,
+            extract_features=False,
+            compute_detailed_metrics=True
+        )
+
+    def classify_from_npy(self, features_file, labels_file, output_file=None, method_name="NPY Classification"):
+        # Load features and labels from .npy files
+        features = np.load(features_file)
+        labels = np.load(labels_file)
+        
+        # Convert to PyTorch tensors
+        features_tensor = torch.FloatTensor(features)
+        labels_tensor = torch.LongTensor(labels)
+        
+        # Create dataset and dataloader
+        dataset = TensorDataset(features_tensor, labels_tensor)
+        dataloader = DataLoader(dataset, batch_size=32, shuffle=False)
+        
+        # Perform classification
         self.model.eval()
         all_labels = []
         all_predictions = []
         all_probs = []
-
+        
         with torch.no_grad():
-            for features, labels in test_loader:
-                features, labels = features.to(self.device), labels.to(self.device)
-                outputs = self.model(features)
+            for batch_features, batch_labels in dataloader:
+                batch_features = batch_features.to(self.device)
+                batch_labels = batch_labels.to(self.device)
+                
+                outputs = self.model(batch_features)
                 probs = torch.softmax(outputs, dim=1)[:, 1]
                 predictions = outputs.argmax(dim=1)
-
-                all_labels.extend(labels.cpu().numpy())
+                
+                all_labels.extend(batch_labels.cpu().numpy())
                 all_predictions.extend(predictions.cpu().numpy())
                 all_probs.extend(probs.cpu().numpy())
-
+        
+        # Calculate metrics
         metrics = {
             'accuracy': accuracy_score(all_labels, all_predictions),
             'precision': precision_score(all_labels, all_predictions, zero_division=0),
@@ -81,11 +113,16 @@ class ClassificationModelHandler:
             'f1': f1_score(all_labels, all_predictions, zero_division=0),
             'auc': roc_auc_score(all_labels, all_probs) if len(set(all_labels)) > 1 else float('nan')
         }
-
-        with open(output_file, "a") as f:
-            f.write(f"\n[Fusion Method: {method_name}]\n")
-            for metric, value in metrics.items():
-                f.write(f"{metric.capitalize()}: {value:.4f}\n")
-            f.write("-" * 50 + "\n")
-
-        print(f"Metrics for {method_name} saved to {output_file}.")
+        
+        # Save results if output file is provided
+        if output_file:
+            with open(output_file, "a") as f:
+                f.write(f"\n[{method_name}]\n")
+                f.write(f"Features file: {features_file}\n")
+                f.write(f"Labels file: {labels_file}\n")
+                for metric, value in metrics.items():
+                    f.write(f"{metric.capitalize()}: {value:.4f}\n")
+                f.write("-" * 50 + "\n")
+            print(f"Metrics for {method_name} saved to {output_file}.")
+        
+        return metrics

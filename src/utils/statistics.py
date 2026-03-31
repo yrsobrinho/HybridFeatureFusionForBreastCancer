@@ -5,7 +5,7 @@ Calculates total samples, positive and negative samples for all datasets
 
 import os
 import numpy as np
-from src.utils.dataloader import BreastMNISTLoader, BCDRLoader, BUSBRALoader, INbreastLoader
+from src.utils.dataloader import BreastMNISTLoader, BCDRLoader, BUSBRALoader, BUSUCLMLoader, INbreastLoader
 
 
 def calculate_dataset_stats(loader_name, train_loader, test_loader, val_loader=None):
@@ -150,6 +150,23 @@ def main():
         )
     except Exception as e:
         print(f"Error loading INbreast: {e}\n")
+
+    # BUSUCLM Dataset
+    print("\n" + "="*60)
+    print("Loading BUSUCLM Dataset...")
+    print("="*60)
+    try:
+        busuclm_loader = BUSUCLMLoader(
+            batch_size=16,
+            image_size=224,
+            root_dir='src/data/BUS-UCLM/png'
+        )
+        train_loader, test_loader, val_loader = busuclm_loader.get_dataloaders()
+        all_stats['BUSUCLM'] = calculate_dataset_stats(
+            'BUSUCLM', train_loader, test_loader, val_loader
+        )
+    except Exception as e:
+        print(f"Error loading BUSUCLM: {e}\n")
     
     # Summary
     print("\n" + "="*60)

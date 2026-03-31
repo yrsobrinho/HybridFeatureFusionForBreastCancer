@@ -361,7 +361,7 @@ class INbreastDataset(Dataset):
 
 
 class INbreastLoader:
-    def __init__(self, batch_size, image_size, root_dir='src/data/INbreast'):
+    def __init__(self, batch_size, image_size, root_dir='src/data/INbreast/png'):
         self.batch_size = batch_size
         self.image_size = image_size
         self.root_dir = root_dir

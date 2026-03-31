@@ -3,7 +3,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from .layers import NonTrainableLayer, TrainableLayer
 
 
@@ -121,17 +120,35 @@ class QuantumModel(QuanvolutionMixin, nn.Module):
         self.flatten = nn.Flatten()
         self.fc = None
 
-    def forward(self, x):
+    def extract_features(self, x):
+        """Extract features before final classification layer.
+        
+        Returns:
+            Features tensor [batch, features_dim] before classification
+        """
         x = x.permute(0, 2, 3, 1)
         x = self._quanvolution_batch(x)
         x = torch.relu(x)
         x = self.flatten(x)
+        return x
+    
+    def forward(self, x):
+        x = self.extract_features(x)
 
         if self.fc is None:
             in_features = x.shape[1]
             self.fc = nn.Linear(in_features, self.num_classes).to(x.device)
         
         x = self.fc(x)
+        return x
+    
+    def forward_relu(self, x):
+        x = self.extract_features(x)
+
+        if self.fc is None:
+            in_features = x.shape[1]
+            self.fc = nn.Linear(in_features, self.num_classes).to(x.device)
+        
         return x
 
 
@@ -197,10 +214,19 @@ class ExtentedQuantumModel(nn.Module):
         self.flatten = nn.Flatten()
         self.fc = None
 
-    def forward(self, x):
+    def extract_features(self, x):
+        """Extract features before final classification layer.
+        
+        Returns:
+            Features tensor [batch, features_dim] before classification
+        """
         x = self.quanv(x)
         x = torch.relu(x)
         x = self.flatten(x)
+        return x
+
+    def forward(self, x):
+        x = self.extract_features(x)
 
         if self.fc is None:
             in_features = x.shape[1]
@@ -208,7 +234,16 @@ class ExtentedQuantumModel(nn.Module):
         
         x = self.fc(x)
         return x
+    
+    def forward(self, x):
+        x = self.extract_features(x)
 
+        if self.fc is None:
+            in_features = x.shape[1]
+            self.fc = nn.Linear(in_features, self.num_classes).to(x.device)
+        
+        x = self.fc(x)
+        return x
 
 class ExtentedQuantumModelWithEncoder(EncoderMixin, nn.Module):
     """Trainable quantum model with encoder - single FC layer."""
