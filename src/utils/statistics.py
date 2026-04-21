@@ -4,8 +4,14 @@ Calculates total samples, positive and negative samples for all datasets
 """
 
 import os
+from pathlib import Path
+
 import numpy as np
 from src.utils.dataloader import BreastMNISTLoader, BCDRLoader, BUSBRALoader, BUSUCLMLoader, INbreastLoader
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+INBREAST_ROOT = PROJECT_ROOT / 'src' / 'data' / 'INbreast' / 'png'
+BUSUCLM_ROOT = PROJECT_ROOT / 'src' / 'data' / 'BUS-UCLM' / 'png'
 
 
 def calculate_dataset_stats(loader_name, train_loader, test_loader, val_loader=None):

@@ -66,11 +66,30 @@ class EncoderMixin:
 
 class QuanvolutionMixin:
     """Mixin class providing quanvolution functionality for non-trainable quantum circuits."""
+
+    def _pad_image_to_patch_grid(self, image):
+        """Pad image to multiples of patch_size so no border information is dropped."""
+        h, w = image.shape[:2]
+        pad_h = (self.patch_size - (h % self.patch_size)) % self.patch_size
+        pad_w = (self.patch_size - (w % self.patch_size)) % self.patch_size
+
+        if pad_h == 0 and pad_w == 0:
+            return image
+
+        padded = np.pad(
+            image,
+            ((0, pad_h), (0, pad_w), (0, 0)),
+            mode="constant",
+            constant_values=0,
+        )
+        return padded
     
     def _quanvolution_single(self, image):
         """Apply quanvolution to a single image."""
         if image.ndim == 2:
             image = np.expand_dims(image, axis=-1)
+
+        image = self._pad_image_to_patch_grid(image)
         
         height_patches = image.shape[0] // self.patch_size
         width_patches = image.shape[1] // self.patch_size
@@ -120,6 +139,21 @@ class QuantumModel(QuanvolutionMixin, nn.Module):
         self.flatten = nn.Flatten()
         self.fc = None
 
+    def _resize_feature_map_if_needed(self, x):
+        """Resize quanvolution map to a fixed output size for input-size flexibility."""
+        if self.output_size is None:
+            return x
+
+        if isinstance(self.output_size, int):
+            target_size = (self.output_size, self.output_size)
+        else:
+            target_size = tuple(self.output_size)
+
+        if x.shape[-2:] == target_size:
+            return x
+
+        return F.interpolate(x, size=target_size, mode="bilinear", align_corners=False)
+
     def extract_features(self, x):
         """Extract features before final classification layer.
         
@@ -128,6 +162,8 @@ class QuantumModel(QuanvolutionMixin, nn.Module):
         """
         x = x.permute(0, 2, 3, 1)
         x = self._quanvolution_batch(x)
+        x = x.permute(0, 3, 1, 2)
+        x = self._resize_feature_map_if_needed(x)
         x = torch.relu(x)
         x = self.flatten(x)
         return x
@@ -196,7 +232,8 @@ class QuantumModelWithEncoder(EncoderMixin, QuanvolutionMixin, nn.Module):
 class ExtentedQuantumModel(nn.Module):
     """Trainable quantum model without encoder - single FC layer."""
     def __init__(self, n_qubits, n_layers, num_classes, patch_size, 
-                 mode: str = "2d", stride: int = None, use_parallel: bool = True):
+                 mode: str = "2d", stride: int = None, use_parallel: bool = True,
+                 output_size=None):
         super().__init__()
         self.quanv = TrainableLayer(
             n_qubits=n_qubits, 
@@ -210,9 +247,25 @@ class ExtentedQuantumModel(nn.Module):
         self.n_qubits = n_qubits
         self.num_classes = num_classes
         self.mode = mode
+        self.output_size = output_size
         
         self.flatten = nn.Flatten()
         self.fc = None
+
+    def _resize_feature_map_if_needed(self, x):
+        """Resize trainable quanvolution feature map to keep FC input shape stable."""
+        if self.output_size is None:
+            return x
+
+        if isinstance(self.output_size, int):
+            target_size = (self.output_size, self.output_size)
+        else:
+            target_size = tuple(self.output_size)
+
+        if x.shape[-2:] == target_size:
+            return x
+
+        return F.interpolate(x, size=target_size, mode="bilinear", align_corners=False)
 
     def extract_features(self, x):
         """Extract features before final classification layer.
@@ -221,6 +274,7 @@ class ExtentedQuantumModel(nn.Module):
             Features tensor [batch, features_dim] before classification
         """
         x = self.quanv(x)
+        x = self._resize_feature_map_if_needed(x)
         x = torch.relu(x)
         x = self.flatten(x)
         return x
@@ -235,7 +289,7 @@ class ExtentedQuantumModel(nn.Module):
         x = self.fc(x)
         return x
     
-    def forward(self, x):
+    def forward_relu(self, x):
         x = self.extract_features(x)
 
         if self.fc is None:

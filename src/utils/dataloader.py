@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from torch.utils.data import DataLoader, WeightedRandomSampler, Dataset
 from torchvision import transforms
 from medmnist import BreastMNIST, INFO
@@ -5,6 +7,10 @@ import os
 from PIL import Image
 import torch
 import numpy as np
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+INBREAST_ROOT = PROJECT_ROOT / "src" / "data" / "INbreast" / "png"
+BUSUCLM_ROOT = PROJECT_ROOT / "src" / "data" / "BUS-UCLM" / "png"
 
 class BreastMNISTLoader:
     def __init__(self, batch_size, image_size):
@@ -361,7 +367,7 @@ class INbreastDataset(Dataset):
 
 
 class INbreastLoader:
-    def __init__(self, batch_size, image_size, root_dir='src/data/INbreast/png'):
+    def __init__(self, batch_size, image_size, root_dir=str(INBREAST_ROOT)):
         self.batch_size = batch_size
         self.image_size = image_size
         self.root_dir = root_dir
@@ -493,7 +499,7 @@ class BUSUCLMDataset(Dataset):
 
 
 class BUSUCLMLoader:
-    def __init__(self, batch_size, image_size, root_dir='src/data/BUS-UCLM/png'):
+    def __init__(self, batch_size, image_size, root_dir=str(BUSUCLM_ROOT)):
         self.batch_size = batch_size
         self.image_size = image_size
         self.root_dir = root_dir

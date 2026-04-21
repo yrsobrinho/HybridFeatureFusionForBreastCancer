@@ -15,6 +15,35 @@ from sklearn.metrics import (
 import matplotlib.pyplot as plt
 
 
+def _extract_quantum_rand_params(model):
+    """Extract non-trainable quantum random parameters when available."""
+    candidate_models = [model]
+
+    # Fusion-style wrappers usually store the inner quantum model in this attribute.
+    if hasattr(model, "quantum_model") and model.quantum_model is not None:
+        candidate_models.append(model.quantum_model)
+
+    for candidate in candidate_models:
+        circuit = getattr(candidate, "circuit", None)
+        rand_params = getattr(circuit, "rand_params", None)
+        if rand_params is not None:
+            try:
+                return np.array(rand_params)
+            except Exception:
+                return None
+    return None
+
+
+def _save_quantum_rand_params_sidecar(rand_params, target_model_path):
+    """Save random quantum parameters to a sidecar .npy file."""
+    if rand_params is None:
+        return None
+
+    sidecar_path = f"{os.path.splitext(target_model_path)[0]}_rand_params.npy"
+    np.save(sidecar_path, rand_params)
+    return sidecar_path
+
+
 def train_epoch(model, dataloader, criterion, optimizer, device, extract_features=False):
     model.train()
     running_loss = 0.0
@@ -273,6 +302,8 @@ def plot_roc_curve(labels, probs, save_path, title="ROC Curve"):
 
 def save_checkpoint(model, optimizer, epoch, val_acc, save_path):
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+    rand_params = _extract_quantum_rand_params(model)
     
     checkpoint = {
         'epoch': epoch,
@@ -280,9 +311,16 @@ def save_checkpoint(model, optimizer, epoch, val_acc, save_path):
         'optimizer_state_dict': optimizer.state_dict(),
         'val_acc': val_acc,
     }
+
+    if rand_params is not None:
+        checkpoint['quantum_rand_params'] = rand_params
     
     torch.save(checkpoint, save_path)
     print(f"Checkpoint saved to {save_path}")
+
+    sidecar_path = _save_quantum_rand_params_sidecar(rand_params, save_path)
+    if sidecar_path is not None:
+        print(f"Quantum rand_params sidecar saved to {sidecar_path}")
 
 
 def load_checkpoint(model, optimizer, checkpoint_path, device):
@@ -381,8 +419,12 @@ def training_loop(model, train_loader, val_loader, criterion, optimizer, device,
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             best_model_path = os.path.join(save_dir, f"best_{model_name}.pth")
+            rand_params = _extract_quantum_rand_params(model)
             torch.save(model.state_dict(), best_model_path)
             print(f"  ✓ New best model saved (val_acc: {best_val_acc:.4f}) at {best_model_path}")
+            sidecar_path = _save_quantum_rand_params_sidecar(rand_params, best_model_path)
+            if sidecar_path is not None:
+                print(f"  ✓ Quantum rand_params sidecar saved at {sidecar_path}")
         
         # Save all epochs if requested
         if save_all_epochs and (epoch + 1) % save_frequency == 0:
@@ -398,7 +440,11 @@ def training_loop(model, train_loader, val_loader, criterion, optimizer, device,
     # Save final model
     if save_all_epochs or not save_best_only:
         final_model_path = os.path.join(save_dir, f"final_{model_name}.pth")
+        rand_params = _extract_quantum_rand_params(model)
         torch.save(model.state_dict(), final_model_path)
         print(f"\n✓ Final model saved at {final_model_path}")
+        sidecar_path = _save_quantum_rand_params_sidecar(rand_params, final_model_path)
+        if sidecar_path is not None:
+            print(f"✓ Quantum rand_params sidecar saved at {sidecar_path}")
     
     return history
