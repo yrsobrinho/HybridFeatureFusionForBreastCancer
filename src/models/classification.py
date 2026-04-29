@@ -74,19 +74,15 @@ class ClassificationModelHandler:
         )
 
     def classify_from_npy(self, features_file, labels_file, output_file=None, method_name="NPY Classification"):
-        # Load features and labels from .npy files
         features = np.load(features_file)
         labels = np.load(labels_file)
         
-        # Convert to PyTorch tensors
         features_tensor = torch.FloatTensor(features)
         labels_tensor = torch.LongTensor(labels)
         
-        # Create dataset and dataloader
         dataset = TensorDataset(features_tensor, labels_tensor)
         dataloader = DataLoader(dataset, batch_size=32, shuffle=False)
         
-        # Perform classification
         self.model.eval()
         all_labels = []
         all_predictions = []
@@ -104,8 +100,7 @@ class ClassificationModelHandler:
                 all_labels.extend(batch_labels.cpu().numpy())
                 all_predictions.extend(predictions.cpu().numpy())
                 all_probs.extend(probs.cpu().numpy())
-        
-        # Calculate metrics
+
         metrics = {
             'accuracy': accuracy_score(all_labels, all_predictions),
             'precision': precision_score(all_labels, all_predictions, zero_division=0),
@@ -113,8 +108,7 @@ class ClassificationModelHandler:
             'f1': f1_score(all_labels, all_predictions, zero_division=0),
             'auc': roc_auc_score(all_labels, all_probs) if len(set(all_labels)) > 1 else float('nan')
         }
-        
-        # Save results if output file is provided
+
         if output_file:
             with open(output_file, "a") as f:
                 f.write(f"\n[{method_name}]\n")

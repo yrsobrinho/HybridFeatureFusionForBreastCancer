@@ -65,7 +65,7 @@ class EncoderMixin:
 
 
 class QuanvolutionMixin:
-    """Mixin class providing quanvolution functionality for non-trainable quantum circuits."""
+
 
     def _pad_image_to_patch_grid(self, image):
         """Pad image to multiples of patch_size so no border information is dropped."""
@@ -125,7 +125,6 @@ class QuanvolutionMixin:
 
 
 class QuantumModel(QuanvolutionMixin, nn.Module):
-    """Non-trainable quantum model without encoder."""
     def __init__(self, n_qubits, n_layers, rand_params, output_size=(14, 14), 
                  patch_size=2, num_classes=2):
         super(QuantumModel, self).__init__()
@@ -189,7 +188,6 @@ class QuantumModel(QuanvolutionMixin, nn.Module):
 
 
 class QuantumModelWithEncoder(EncoderMixin, QuanvolutionMixin, nn.Module):
-    """Non-trainable quantum model with encoder."""
     def __init__(self, autoencoder, n_qubits, n_layers, rand_params, latent_channels=3, 
                  output_size=(14, 14), patch_size=2, num_classes=2, encoder_output_size=28):
         super(QuantumModelWithEncoder, self).__init__()
@@ -342,168 +340,3 @@ class ExtentedQuantumModelWithEncoder(EncoderMixin, nn.Module):
         
         x = self.fc(x)
         return x
-
-
-class DualStreamQuantumModel(EncoderMixin, nn.Module):
-    """Dual-stream quantum model with separate horizontal and vertical processing pipelines.
-    
-    Architecture:
-    - Stream 1 (Horizontal): quantum horizontal → FC layers → features_h
-    - Stream 2 (Vertical): quantum vertical → FC layers → features_v
-    - Fusion: features_h + features_v → final classification
-    
-    Args:
-        fusion_mode: How to combine streams - 'concat', 'sum', 'avg', 'max', 'weighted'
-        use_horizontal: Enable horizontal stream
-        use_vertical: Enable vertical stream
-    """
-    def __init__(self, n_qubits, n_layers, num_classes, patch_size,
-                 encoder: nn.Module = None, encoder_output_size: int = 28,
-                 stride: int = None, use_parallel: bool = True,
-                 fusion_mode: str = "concat",
-                 use_horizontal: bool = True,
-                 use_vertical: bool = True,
-                 hidden_dims: list = [128, 64]):
-        super().__init__()
-        
-        if not use_horizontal and not use_vertical:
-            raise ValueError("At least one stream (horizontal or vertical) must be enabled")
-        
-        self.encoder = encoder
-        self.encoder_output_size = encoder_output_size
-        self.num_classes = num_classes
-        self.fusion_mode = fusion_mode
-        self.use_horizontal = use_horizontal
-        self.use_vertical = use_vertical
-        self.hidden_dims = hidden_dims
-        
-        # Horizontal stream (quantum + classical)
-        if use_horizontal:
-            self.quanv_h = TrainableLayer(
-                n_qubits=n_qubits,
-                n_layers=n_layers,
-                patch_size=patch_size,
-                mode="sequential",  # Will only use horizontal
-                stride=stride,
-                use_parallel=use_parallel
-            )
-            self.fc_h1 = None
-            self.fc_h2 = None
-            self.bn_h1 = None
-            self.bn_h2 = None
-        
-        # Vertical stream (quantum + classical)
-        if use_vertical:
-            self.quanv_v = TrainableLayer(
-                n_qubits=n_qubits,
-                n_layers=n_layers,
-                patch_size=patch_size,
-                mode="sequential",  # Will only use vertical
-                stride=stride,
-                use_parallel=use_parallel
-            )
-            self.fc_v1 = None
-            self.fc_v2 = None
-            self.bn_v1 = None
-            self.bn_v2 = None
-        
-        # Fusion layer
-        self.fc_fusion = None
-        
-        # Learnable fusion weights if using weighted fusion
-        if fusion_mode == "weighted":
-            self.alpha = nn.Parameter(torch.tensor(0.5))
-
-    def _process_horizontal(self, x):
-        """Process through horizontal quantum + classical stream."""
-        x_h = self.quanv_h.horizontal(x)
-        x_h = x_h.flatten(start_dim=1)
-        
-        if self.fc_h1 is None:
-            in_features = x_h.shape[1]
-            self.fc_h1 = nn.Linear(in_features, self.hidden_dims[0]).to(x_h.device)
-            self.bn_h1 = nn.BatchNorm1d(self.hidden_dims[0]).to(x_h.device)
-            self.fc_h2 = nn.Linear(self.hidden_dims[0], self.hidden_dims[1]).to(x_h.device)
-            self.bn_h2 = nn.BatchNorm1d(self.hidden_dims[1]).to(x_h.device)
-        
-        x_h = self.fc_h1(x_h)
-        x_h = self.bn_h1(x_h)
-        x_h = F.relu(x_h)
-        x_h = F.dropout(x_h, p=0.3, training=self.training)
-        
-        x_h = self.fc_h2(x_h)
-        x_h = self.bn_h2(x_h)
-        x_h = F.relu(x_h)
-        x_h = F.dropout(x_h, p=0.2, training=self.training)
-        
-        return x_h
-
-    def _process_vertical(self, x):
-        """Process through vertical quantum + classical stream."""
-        x_v = self.quanv_v.vertical(x)
-        x_v = x_v.flatten(start_dim=1)
-        
-        if self.fc_v1 is None:
-            in_features = x_v.shape[1]
-            self.fc_v1 = nn.Linear(in_features, self.hidden_dims[0]).to(x_v.device)
-            self.bn_v1 = nn.BatchNorm1d(self.hidden_dims[0]).to(x_v.device)
-            self.fc_v2 = nn.Linear(self.hidden_dims[0], self.hidden_dims[1]).to(x_v.device)
-            self.bn_v2 = nn.BatchNorm1d(self.hidden_dims[1]).to(x_v.device)
-        
-        x_v = self.fc_v1(x_v)
-        x_v = self.bn_v1(x_v)
-        x_v = F.relu(x_v)
-        x_v = F.dropout(x_v, p=0.3, training=self.training)
-        
-        x_v = self.fc_v2(x_v)
-        x_v = self.bn_v2(x_v)
-        x_v = F.relu(x_v)
-        x_v = F.dropout(x_v, p=0.2, training=self.training)
-        
-        return x_v
-
-    def _fuse_features(self, x_h, x_v):
-        """Fuse horizontal and vertical features."""
-        if x_h is None:
-            return x_v
-        if x_v is None:
-            return x_h
-        
-        if self.fusion_mode == "concat":
-            fused = torch.cat([x_h, x_v], dim=1)
-        elif self.fusion_mode == "sum":
-            fused = x_h + x_v
-        elif self.fusion_mode == "avg":
-            fused = (x_h + x_v) / 2
-        elif self.fusion_mode == "max":
-            fused = torch.max(x_h, x_v)
-        elif self.fusion_mode == "weighted":
-            alpha = torch.sigmoid(self.alpha)
-            fused = alpha * x_h + (1 - alpha) * x_v
-        else:
-            raise ValueError(f"Unknown fusion mode: {self.fusion_mode}")
-        
-        return fused
-
-    def forward(self, x):
-        # Apply encoder if available
-        if hasattr(self, '_apply_encoder'):
-            x = self._apply_encoder(x)
-        
-        # Ensure single channel
-        
-        
-        # Process through streams
-        x_h = self._process_horizontal(x) if self.use_horizontal else None
-        x_v = self._process_vertical(x) if self.use_vertical else None
-        
-        # Fuse features
-        fused = self._fuse_features(x_h, x_v)
-        
-        # Final classification layer
-        if self.fc_fusion is None:
-            in_features = fused.shape[1]
-            self.fc_fusion = nn.Linear(in_features, self.num_classes).to(fused.device)
-        
-        out = self.fc_fusion(fused)
-        return out

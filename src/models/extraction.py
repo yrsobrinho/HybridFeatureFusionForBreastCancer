@@ -10,15 +10,7 @@ import torch.nn as nn
 
 
 class ClassicalFeatureExtractor(nn.Module):
-    """Extract features from classical models (without encoder).
-    
-    Works with:
-    - ClassicalModel (ResNet18 without encoder)
-    - ShallowCNN (Shallow CNN without encoder)
-    
-    Args:
-        model: Trained classical model with extract_features() method
-    """
+
     def __init__(self, model):
         super().__init__()
         self.model = model
@@ -32,15 +24,6 @@ class ClassicalFeatureExtractor(nn.Module):
 
 
 class ClassicalFeatureExtractorWithEncoder(nn.Module):
-    """Extract features from classical models with encoder.
-    
-    Works with:
-    - ClassicalModelWithEncoder (ResNet18 with encoder)
-    - ShallowCNNWithEncoder (Shallow CNN with encoder)
-    
-    Args:
-        model: Trained classical model with encoder and extract_features() method
-    """
     def __init__(self, model):
         super().__init__()
         self.model = model
@@ -60,15 +43,6 @@ class ClassicalFeatureExtractorWithEncoder(nn.Module):
 
 
 class QuantumFeatureExtractor(nn.Module):
-    """Extract features from quantum models (without encoder).
-    
-    Works with:
-    - QuantumModel (non-trainable quantum model without encoder)
-    - ExtentedQuantumModel (trainable quantum model with 3 FC layers, no encoder)
-    
-    Args:
-        model: Trained quantum model
-    """
     def __init__(self, model):
         super().__init__()
         self.model = model
@@ -83,12 +57,10 @@ class QuantumFeatureExtractor(nn.Module):
                 x = self.model._quanvolution_batch(x)
                 x = torch.relu(x)
                 x = self.model.flatten(x)
-            # For ExtentedQuantumModel (trainable - single FC layer)
             elif hasattr(self.model, 'quanv'):
                 x = self.model.quanv(x)
                 x = torch.relu(x)
                 x = self.model.flatten(x)
-                # Don't pass through fc - we want features before classification
             else:
                 raise ValueError("Unknown quantum model architecture")
         
@@ -96,16 +68,6 @@ class QuantumFeatureExtractor(nn.Module):
 
 
 class QuantumFeatureExtractorWithEncoder(nn.Module):
-    """Extract features from quantum models with encoder.
-    
-    Works with:
-    - QuantumModelWithEncoder (non-trainable quantum with encoder)
-    - ExtentedQuantumModelWithEncoder (trainable quantum with encoder and 3 FC layers)
-    - DualStreamQuantumModel (dual-stream quantum model with horizontal + vertical processing)
-    
-    Args:
-        model: Trained quantum model with encoder
-    """
     def __init__(self, model):
         super().__init__()
         self.model = model
@@ -162,8 +124,6 @@ class GenericFeatureExtractor(nn.Module):
         super().__init__()
         self.model = model
         self.model.eval()
-        
-        # Detect model type and set appropriate extractor
         self._setup_extractor()
         
     def _setup_extractor(self):
@@ -194,39 +154,11 @@ class GenericFeatureExtractor(nn.Module):
     def __repr__(self):
         return f"GenericFeatureExtractor(model_type='{self.model_type}')"
 
-
-# Convenience functions for creating extractors
-
 def create_extractor(model):
-    """Create appropriate feature extractor for any model type.
-    
-    Args:
-        model: Trained model (classical or quantum, with or without encoder)
-        
-    Returns:
-        Feature extractor instance
-        
-    Example:
-        >>> extractor = create_extractor(trained_model)
-        >>> features = extractor(images)
-    """
     return GenericFeatureExtractor(model)
 
 
 def extract_features_from_dataloader(model, dataloader, device):
-    """Extract features from entire dataloader.
-    
-    Args:
-        model: Trained model
-        dataloader: PyTorch DataLoader
-        device: Device to run extraction on
-        
-    Returns:
-        Tuple of (features, labels) as numpy arrays
-        
-    Example:
-        >>> features, labels = extract_features_from_dataloader(model, test_loader, device)
-    """
     import numpy as np
     from tqdm import tqdm
     

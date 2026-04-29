@@ -27,7 +27,6 @@ class NonTrainableLayer:
 
 
 class TrainableLayer(nn.Module):
-    """Trainable quantum layer with parameterized quantum circuits."""
     def __init__(self, n_qubits, n_layers, patch_size, mode="2d", stride=None, use_parallel=True):
         super().__init__()
         self.n_qubits = n_qubits
@@ -106,96 +105,6 @@ class TrainableLayer(nn.Module):
         
         return patches, num_patches
 
-    def horizontal(self, x):
-        """Apply quantum layer horizontally (row-wise)."""
-        B, C, H, W = x.shape
-        p = self.patch_size
-
-        pad_w = (p - (W % p)) % p
-        pad_h = (p - (H % p)) % p
-        if pad_w > 0 or pad_h > 0:
-            x = F.pad(x, (0, pad_w, 0, pad_h), mode='constant', value=0.0)
-            B, C, H, W = x.shape
-
-        out_w = W // p
-        
-        rows = x[:, 0, :, :].reshape(B * H, W)
-        
-        patches, num_patches = self._prepare_patches(rows, W)
-        
-        q_out = self.qlayer(patches) 
-        
-        q_out = q_out.view(B, H, num_patches, self.n_qubits)
-        q_out = q_out.permute(0, 3, 1, 2)  
-        
-        return q_out
-
-    def vertical(self, x):
-        """Apply quantum layer vertically (column-wise)."""
-        B, C, H, W = x.shape
-        p = self.patch_size
-
-        pad_h = (p - (H % p)) % p
-        if pad_h > 0:
-            x = F.pad(x, (0, 0, 0, pad_h), mode='constant', value=0.0)
-            B, C, H, W = x.shape
-
-        out_h = H // p
-        
-        cols = x[:, 0, :, :].permute(0, 2, 1).reshape(B * W, H)
-        
-        patches, num_patches = self._prepare_patches(cols, H)
-        
-        q_out = self.qlayer(patches) 
-        
-        q_out = q_out.view(B, W, num_patches, self.n_qubits)
-        q_out = q_out.permute(0, 3, 2, 1)  
-        
-        return q_out
-    
-    def parallel(self, x):
-        """Apply quantum layer in parallel (both horizontal and vertical)."""
-        B, C, H, W = x.shape
-        p = self.patch_size
-
-        pad_w = (p - (W % p)) % p
-        pad_h = (p - (H % p)) % p
-        if pad_w > 0 or pad_h > 0:
-            x = F.pad(x, (0, pad_w, 0, pad_h), mode='constant', value=0.0)
-            B, C, H, W = x.shape
-
-        x_single = x[:, 0, :, :]  
-
-        rows = x_single.reshape(B * H, W)
-        cols = x_single.permute(0, 2, 1).reshape(B * W, H)
-
-        num_patches_h = W // p
-        num_patches_v = H // p
-
-        patches_h = rows[:, :num_patches_h * p].reshape(-1, p)
-        patches_v = cols[:, :num_patches_v * p].reshape(-1, p)
-
-        if p != self.n_qubits:
-            if p > self.n_qubits:
-                patches_h = patches_h[:, :self.n_qubits]
-                patches_v = patches_v[:, :self.n_qubits]
-            else:
-                pad_size = self.n_qubits - p
-                patches_h = F.pad(patches_h, (0, pad_size))
-                patches_v = F.pad(patches_v, (0, pad_size))
-
-        all_patches = torch.cat([patches_h, patches_v], dim=0)
-        all_q_out = self.qlayer(all_patches)
-
-        total_h = patches_h.shape[0]
-        q_out_h = all_q_out[:total_h].view(B, H, num_patches_h, self.n_qubits)
-        q_out_v = all_q_out[total_h:].view(B, W, num_patches_v, self.n_qubits)
-
-        q_out_h = q_out_h.permute(0, 3, 1, 2)
-        q_out_v = q_out_v.permute(0, 3, 2, 1)
-        
-        return q_out_h, q_out_v
-
     def quanv2d(self, x):
         """Apply 2D quantum convolution."""
         B, C, H, W = x.shape
@@ -236,16 +145,5 @@ class TrainableLayer(nn.Module):
         """Forward pass through quantum layer."""
         if self.mode == "2d":
             return self.quanv2d(x)
-        elif self.mode == "sequential":
-            x = self.horizontal(x)
-            x = self.vertical(x)
-            return x
-        elif self.mode == "matmul":
-            if self.use_parallel:
-                x_h, x_v = self.parallel(x)
-            else:
-                x_h = self.horizontal(x)
-                x_v = self.vertical(x)
-            return x_v @ x_h
         else:
-            raise ValueError(f"Unknown mode: {self.mode}. Use '2d', 'sequential', or 'matmul'")
+            raise ValueError(f"Unknown mode: {self.mode}. Use '2d'.")
