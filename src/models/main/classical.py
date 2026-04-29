@@ -47,10 +47,6 @@ class ShallowCNN(nn.Module):
         return features
     
 class ClassicalModel(nn.Module):
-    """ResNet18-based model for breast cancer classification.
-    
-    Uses centralized training functions from src.utils.training.
-    """
     def __init__(self, num_classes):
         super(ClassicalModel, self).__init__()
         self.resnet = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
