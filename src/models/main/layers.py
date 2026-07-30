@@ -38,6 +38,7 @@ class TrainableLayer(nn.Module):
 
         self.dev = qml.device("lightning.qubit", wires=n_qubits)
 
+        @qml.qnode(self.dev, interface='torch')
         def circuit(inputs, weights):
             qml.AngleEmbedding(inputs, wires=range(n_qubits), rotation="Y")
             qml.templates.RandomLayers(weights, wires=range(n_qubits))
@@ -135,8 +136,14 @@ class TrainableLayer(nn.Module):
             pad_size = self.n_qubits - patch_dim
             patches_flat = F.pad(patches_flat, (0, pad_size), value=0.0)
         
-        q_out = self.qlayer(patches_flat)  
-        
+        q_out = self.qlayer(patches_flat)
+
+        # lightning.qubit always simulates on CPU: with trainable weights PennyLane
+        # moves the result back to the input's device, but when the weights are frozen
+        # (requires_grad=False) there is no autograd path and the tensor stays on CPU.
+        # Realign it, the same way QuanvolutionMixin does for the fixed circuit.
+        q_out = q_out.to(patches_flat.device)
+
         q_out = q_out.view(B, out_h, out_w, self.n_qubits)
         q_out = q_out.permute(0, 3, 1, 2)  
         return q_out

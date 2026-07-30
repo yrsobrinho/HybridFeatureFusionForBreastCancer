@@ -5,14 +5,22 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 from sklearn.metrics import (
-    accuracy_score, 
-    precision_score, 
-    recall_score, 
-    f1_score, 
+    accuracy_score,
+    balanced_accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
     roc_auc_score,
     roc_curve
 )
 import matplotlib.pyplot as plt
+
+
+# Metrics `training_loop` can select the best checkpoint on. Plain accuracy is a poor
+# criterion on an imbalanced validation split (BUS-UCLM val is 32/7): it rewards the
+# epoch that predicts the majority class most, which is the wrong model whenever the
+# test split leans the other way.
+SELECTION_METRICS = ("accuracy", "balanced_accuracy", "f1", "auc", "loss")
 
 
 def _extract_quantum_rand_params(model):
@@ -90,17 +98,26 @@ def train_epoch(model, dataloader, criterion, optimizer, device, extract_feature
     return epoch_loss, epoch_acc
 
 
-def validate_model(model, dataloader, criterion, device, extract_features=False):
+def validate_model(model, dataloader, criterion, device, extract_features=False,
+                   return_metrics=False):
+    """Evaluate on the validation split.
+
+    Returns the legacy `(loss, accuracy, precision, recall, f1, auc)` tuple, or —
+    with `return_metrics=True` — a dict that also carries `balanced_accuracy`.
+    """
     model.eval()
     total_loss = 0.0
     all_labels = []
     all_predictions = []
     all_probs = []
-    
+
     if len(dataloader) == 0:
         print("Warning: validation dataloader is empty!")
+        if return_metrics:
+            return {"loss": 0.0, "accuracy": 0.0, "balanced_accuracy": 0.0,
+                    "precision": 0.0, "recall": 0.0, "f1": 0.0, "auc": float("nan")}
         return 0.0, 0.0, 0.0, 0.0, 0.0, float('nan')
-    
+
     with torch.no_grad():
         for images, labels in tqdm(dataloader, desc="Validation", leave=False):
             images = images.to(device)
@@ -124,16 +141,21 @@ def validate_model(model, dataloader, criterion, device, extract_features=False)
             all_labels.extend(labels.cpu().numpy())
 
     accuracy = accuracy_score(all_labels, all_predictions)
+    balanced_accuracy = balanced_accuracy_score(all_labels, all_predictions)
     precision = precision_score(all_labels, all_predictions, zero_division=0)
     recall = recall_score(all_labels, all_predictions, zero_division=0)
     f1 = f1_score(all_labels, all_predictions, zero_division=0)
-    
+
     try:
         auc = roc_auc_score(all_labels, all_probs)
     except ValueError:
         auc = float("nan")
-    
+
     avg_loss = total_loss / len(dataloader)
+    if return_metrics:
+        return {"loss": avg_loss, "accuracy": accuracy,
+                "balanced_accuracy": balanced_accuracy, "precision": precision,
+                "recall": recall, "f1": f1, "auc": auc}
     return avg_loss, accuracy, precision, recall, f1, auc
 
 
@@ -359,36 +381,64 @@ def load_checkpoint(model, optimizer, checkpoint_path, device):
         return 0, 0.0
 
 
+def _selection_score(metrics, selection_metric):
+    """Rank one epoch — higher is better, ties broken by validation AUC.
+
+    On a small validation split the counting metrics move in coarse steps (1/39 on
+    BUS-UCLM val), so many epochs tie on the primary metric; AUC is threshold-free
+    and continuous, so it picks the better-separated model among them.
+    """
+    value = -metrics[selection_metric] if selection_metric == "loss" else metrics[selection_metric]
+    if value != value:  # NaN: AUC is undefined when the split holds a single class.
+        value = float("-inf")
+    if selection_metric == "auc":
+        return (value,)
+    tiebreak = metrics["auc"]
+    return (value, float("-inf") if tiebreak != tiebreak else tiebreak)
+
+
 def training_loop(model, train_loader, val_loader, criterion, optimizer, device,
                   num_epochs, save_dir, model_name="model", extract_features=False,
-                  save_best_only=True, save_all_epochs=False, save_frequency=1):
+                  save_best_only=True, save_all_epochs=False, save_frequency=1,
+                  selection_metric="accuracy"):
     """
     Training loop with flexible checkpoint saving.
-    
+
     Args:
-        save_best_only: If True, only saves the best model based on validation accuracy
+        save_best_only: If True, only saves the best model based on `selection_metric`
         save_all_epochs: If True, saves checkpoint at every epoch (overrides save_best_only)
         save_frequency: Save checkpoint every N epochs (only used if save_all_epochs=True)
+        selection_metric: validation metric the best checkpoint is chosen on, one of
+            SELECTION_METRICS. Use `balanced_accuracy` (or `auc`) on imbalanced splits —
+            plain `accuracy` there just tracks the majority-class rate.
     """
+    if selection_metric not in SELECTION_METRICS:
+        raise ValueError(f"selection_metric invalido: {selection_metric!r}. "
+                         f"Opcoes: {list(SELECTION_METRICS)}")
+
     os.makedirs(save_dir, exist_ok=True)
-    
+
     # Create checkpoints subdirectory if saving all epochs
     if save_all_epochs:
         checkpoints_dir = os.path.join(save_dir, "checkpoints")
         os.makedirs(checkpoints_dir, exist_ok=True)
-    
-    best_val_acc = 0.0
+
+    # None, not 0.0: the first epoch must always produce a checkpoint, otherwise a run
+    # that never beats the baseline would be tested with final-epoch weights.
+    best_score = None
     history = {
         'train_loss': [],
         'train_acc': [],
         'val_loss': [],
         'val_acc': [],
+        'val_balanced_acc': [],
         'val_precision': [],
         'val_recall': [],
         'val_f1': [],
         'val_auc': []
     }
-    
+    print(f"Selecionando o melhor checkpoint por val_{selection_metric}")
+
     for epoch in range(num_epochs):
         print(f"Epoch {epoch+1}/{num_epochs}")
         
@@ -396,14 +446,18 @@ def training_loop(model, train_loader, val_loader, criterion, optimizer, device,
             model, train_loader, criterion, optimizer, device, extract_features
         )
    
-        val_loss, val_acc, val_prec, val_rec, val_f1, val_auc = validate_model(
-            model, val_loader, criterion, device, extract_features
+        val_metrics = validate_model(
+            model, val_loader, criterion, device, extract_features, return_metrics=True
         )
+        val_loss, val_acc = val_metrics["loss"], val_metrics["accuracy"]
+        val_bal_acc, val_prec = val_metrics["balanced_accuracy"], val_metrics["precision"]
+        val_rec, val_f1, val_auc = val_metrics["recall"], val_metrics["f1"], val_metrics["auc"]
 
         history['train_loss'].append(train_loss)
         history['train_acc'].append(train_acc)
         history['val_loss'].append(val_loss)
         history['val_acc'].append(val_acc)
+        history['val_balanced_acc'].append(val_bal_acc)
         history['val_precision'].append(val_prec)
         history['val_recall'].append(val_rec)
         history['val_f1'].append(val_f1)
@@ -412,16 +466,19 @@ def training_loop(model, train_loader, val_loader, criterion, optimizer, device,
         print(f"\nEpoch {epoch+1} Summary:")
         print(f"  Train - Loss: {train_loss:.4f}, Acc: {train_acc:.4f}")
         print(f"  Val   - Loss: {val_loss:.4f}, Acc: {val_acc:.4f}, "
+              f"BalAcc: {val_bal_acc:.4f}, "
               f"Precision: {val_prec:.4f}, Recall: {val_rec:.4f}, "
               f"F1: {val_f1:.4f}, AUC: {val_auc:.4f}")
 
         # Save best model
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
+        score = _selection_score(val_metrics, selection_metric)
+        if best_score is None or score > best_score:
+            best_score = score
             best_model_path = os.path.join(save_dir, f"best_{model_name}.pth")
             rand_params = _extract_quantum_rand_params(model)
             torch.save(model.state_dict(), best_model_path)
-            print(f"  ✓ New best model saved (val_acc: {best_val_acc:.4f}) at {best_model_path}")
+            print(f"  ✓ New best model saved (val_{selection_metric}: "
+                  f"{val_metrics[selection_metric]:.4f}) at {best_model_path}")
             sidecar_path = _save_quantum_rand_params_sidecar(rand_params, best_model_path)
             if sidecar_path is not None:
                 print(f"  ✓ Quantum rand_params sidecar saved at {sidecar_path}")

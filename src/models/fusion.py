@@ -176,7 +176,12 @@ class OnlineFusionModel(nn.Module):
         self.classical_projection = None
         self.quantum_projection = None
 
-        self.fusion_norm = nn.LayerNorm(feature_dim * 2)
+        # elementwise_affine=False: o ganho afim do LayerNorm tem 2*feature_dim
+        # escalares livres que conseguem cancelar o gamma da fusao por temperatura
+        # dimensao a dimensao, tornando gamma nao-identificavel. Sem afim, o LN so
+        # centra/escala o vetor conjunto e a razao ||gamma*h_Q|| / ||h_C|| = gamma
+        # chega intacta no classificador.
+        self.fusion_norm = nn.LayerNorm(feature_dim * 2, elementwise_affine=False)
         self.fusion_relu = nn.ReLU()
         self.fusion_fc = nn.Linear(feature_dim * 2, num_classes)
         
@@ -299,4 +304,71 @@ class OnlineFusionModel(nn.Module):
         return param_groups
 
 
-__all__ = ["FusionMethods", "OnlineFusionModel"]
+class TemperatureFusionModel(OnlineFusionModel):
+    """Fusao com temperatura. As tres condicoes do experimento vivem no MESMO grafo:
+
+      gamma_mode='none'      -> gamma=1.0 congelado. Identico ao SHF (h_Q (+) h_C),
+                                porque 1.0 * h_Q == h_Q. Serve de baseline exato.
+      gamma_mode='fixed'     -> gamma congelado em init_gamma (varredura de valores).
+      gamma_mode='trainable' -> gamma aprendido via log_gamma (TSHF, eq. 4).
+
+    Nenhuma norm interfere na comparacao: a L2 por branch e o que torna gamma
+    bem-definido (sem ela a quantum_projection absorveria qualquer escala) e o
+    fusion_norm herdado esta sem ganho afim, entao nao consegue desfazer gamma.
+    """
+
+    def __init__(self, classical_model, quantum_model, feature_dim=128,
+                 num_classes=2, freeze_classical=False, freeze_quantum=False,
+                 init_gamma=1.0, trainable_gamma=True):
+        super().__init__(classical_model=classical_model, quantum_model=quantum_model,
+                         feature_dim=feature_dim, num_classes=num_classes,
+                         freeze_classical=freeze_classical, freeze_quantum=freeze_quantum)
+        init_gamma = float(max(init_gamma, 1e-6))
+        self.trainable_gamma = bool(trainable_gamma)
+        _log_gamma = torch.tensor(np.log(init_gamma), dtype=torch.float32)
+        if self.trainable_gamma:
+            self.log_gamma = nn.Parameter(_log_gamma)
+        else:
+            self.register_buffer('log_gamma', _log_gamma)
+
+    @property
+    def gamma(self):
+        return torch.exp(self.log_gamma)
+
+    def extract_features(self, x):
+        if hasattr(self.classical_model, 'extract_features'):
+            classical_feats = self.classical_model.extract_features(x)
+        else:
+            classical_feats = self.classical_model(x)
+
+        if hasattr(self.quantum_model, 'extract_features'):
+            quantum_feats = self.quantum_model.extract_features(x)
+        else:
+            quantum_feats = self.quantum_model(x)
+
+        if classical_feats.ndim > 2:
+            classical_feats = classical_feats.flatten(start_dim=1)
+        if quantum_feats.ndim > 2:
+            quantum_feats = quantum_feats.flatten(start_dim=1)
+
+        if self.classical_projection is None or self.quantum_projection is None:
+            self._init_projections(classical_feats.shape[1], quantum_feats.shape[1], x.device)
+
+        classical_proj = self.classical_projection(classical_feats)
+        quantum_proj = self.quantum_projection(quantum_feats)
+
+        classical_norm = F.normalize(classical_proj, p=2, dim=1)
+        quantum_norm = F.normalize(quantum_proj, p=2, dim=1)
+        quantum_scaled = self.gamma * quantum_norm
+
+        return torch.cat([classical_norm, quantum_scaled], dim=1)
+
+    def get_parameter_groups(self, lr_classical=1e-4, lr_quantum=1e-3,
+                             lr_fusion=1e-3, lr_gamma=1e-2):
+        groups = super().get_parameter_groups(lr_classical, lr_quantum, lr_fusion)
+        if self.trainable_gamma:
+            groups.append({'params': [self.log_gamma], 'lr': lr_gamma})
+        return groups
+
+
+__all__ = ["FusionMethods", "OnlineFusionModel", "TemperatureFusionModel"]

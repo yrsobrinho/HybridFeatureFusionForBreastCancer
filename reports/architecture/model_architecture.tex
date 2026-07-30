@@ -1,0 +1,102 @@
+% Model architecture table (reviewer request).
+% Requires: \usepackage{booktabs}  \usepackage{multirow}  \usepackage{amsmath}
+% Figures verified against the implementation with
+% n_qubits=4, n_layers=1, patch_size=2, image_size=28, num_classes=2, feature_dim=128.
+
+\begin{table*}[t]
+\centering
+\caption{Architecture of the hybrid feature-fusion pipeline. Shapes are given for a
+$1\times28\times28$ grayscale input; parameter counts are exact.}
+\label{tab:architecture}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}llllr@{}}
+\toprule
+\textbf{Block} & \textbf{Layer / setting} & \textbf{Configuration} & \textbf{Output} & \textbf{Params} \\
+\midrule
+
+Input & Preprocessing & grayscale, resize $28\times28$, $\mathrm{Normalize}(\mu{=}0.5,\sigma{=}0.5)$, batch 16 & $1\times28\times28$ & -- \\
+\midrule
+
+\multirow{6}{*}{\shortstack[l]{SCNN\\(from scratch)}}
+ & Conv block 1 & $\mathrm{Conv}(1{\to}32,3{\times}3,s{=}2,p{=}1)$ + BN + ReLU + MaxPool$(2,2)$ & $32\times7\times7$ & 384 \\
+ & Conv block 2 & $\mathrm{Conv}(32{\to}64,3{\times}3,s{=}2,p{=}1)$ + BN + ReLU + MaxPool$(2,2)$ & $64\times2\times2$ & 18{,}624 \\
+ & Conv block 3 & $\mathrm{Conv}(64{\to}128,3{\times}3,s{=}2,p{=}1)$ + BN + ReLU + GAP$(1{\times}1)$ & $128\times1\times1$ & 74{,}112 \\
+ & Feature tap & flatten & 128 & -- \\
+ & Baseline head & $\mathrm{Linear}(128{\to}2)$ & 2 & 258 \\
+ & \textit{Total} & & & \textbf{93{,}378} \\
+\midrule
+
+\multirow{5}{*}{\shortstack[l]{ResNet-18\\(ImageNet init.)}}
+ & Stem adaptation & \texttt{conv1} $\to$ $\mathrm{Conv}(1{\to}64,7{\times}7,s{=}2,p{=}3,\text{no bias})$ & $64\times14\times14$ & 3{,}136 \\
+ & layer1--layer4 & unchanged BasicBlocks $[2,2,2,2]$, widths $64{\to}512$ & $512\times1\times1$ & 11{,}166{,}912 \\
+ & Head adaptation & \texttt{fc} $\to$ $\mathrm{Linear}(512{\to}2)$ (was $512{\to}1000$) & 2 & 1{,}026 \\
+ & Feature tap & backbone up to GAP, flattened & 512 & -- \\
+ & \textit{Total} & & & \textbf{11{,}171{,}266} \\
+\midrule
+
+\multirow{5}{*}{\shortstack[l]{Quantum branch\\(shared)}}
+ & Patching & non-overlapping $2\times2$ patches, stride 2, zero-padded grid & 196 patches & -- \\
+ & Qubits / layers & 4 qubits (one per patch pixel), 1 variational layer & -- & -- \\
+ & Simulator & PennyLane \texttt{lightning.qubit}, analytic (no shots), CPU & -- & -- \\
+ & Measurement & $\langle Z_j\rangle$, $j=1,\dots,4$ & $4\times14\times14$ & -- \\
+ & Post-processing & bilinear resize + ReLU + flatten & 784 & -- \\
+\cmidrule(l){2-5}
+\multirow{4}{*}{\shortstack[l]{\quad QC-fixed}}
+ & Encoding & $R_Y(\pi x_j)$ on wire $j$ & -- & -- \\
+ & Ansatz & \texttt{RandomLayers}$(\Theta)$, $\Theta\!\sim\!\mathcal{U}(0,2\pi)$, shape $(1,4)$, frozen & -- & 0 \\
+ & Head & $\mathrm{Linear}(784{\to}2)$ & 2 & 1{,}570 \\
+ & \textit{Total} & & & \textbf{1{,}570} \\
+\cmidrule(l){2-5}
+\multirow{5}{*}{\shortstack[l]{\quad QC-trainable}}
+ & Encoding & \texttt{AngleEmbedding}$(x,\text{rotation}{=}Y)$ on 4 wires & -- & -- \\
+ & Ansatz & \texttt{RandomLayers}$(W)$, $W\in\mathbb{R}^{1\times4}$, trained via \texttt{TorchLayer} & -- & 4 \\
+ & Circuit size & sampled instance: 9 gates, depth 4 (RY 5, RX 2, RZ 1, CNOT 1) & -- & -- \\
+ & Head & $\mathrm{Linear}(784{\to}2)$ & 2 & 1{,}570 \\
+ & \textit{Total} & & & \textbf{1{,}574} \\
+\midrule
+
+\multirow{4}{*}{\shortstack[l]{Projection\\heads}}
+ & Classical & $\mathrm{Linear}(128{\to}128)$ (SCNN) / $\mathrm{Linear}(512{\to}128)$ (ResNet-18) & 128 & 16{,}512 / 65{,}664 \\
+ & Quantum & $\mathrm{Linear}(784{\to}128)$ & 128 & 100{,}480 \\
+ & Normalisation & per-branch $\ell_2$ projection onto the unit sphere & 128 & 0 \\
+ & Instantiation & lazy: input dimensions inferred at the first forward pass & -- & -- \\
+\midrule
+
+\multirow{5}{*}{\shortstack[l]{Fusion layer\\(SHF / TSHF)}}
+ & Temperature & $\gamma=\exp(\log\gamma)$; modes: none ($\gamma{=}1$), fixed, trainable & scalar & 1 \\
+ & Concatenation & $[\,\mathbf{h}_C\,;\,\gamma\,\mathbf{h}_Q\,]$ & 256 & -- \\
+ & Normalisation & $\mathrm{LayerNorm}(256)$, \textbf{without} affine gain (keeps $\gamma$ identifiable) & 256 & 0 \\
+ & Activation & ReLU & 256 & -- \\
+ & Classifier & $\mathrm{Linear}(256{\to}2)$ & 2 & 514 \\
+\midrule
+
+\multirow{2}{*}{\shortstack[l]{Classification\\handler}}
+ & MLP & $\mathrm{Linear}(d{\to}128)$ $\to$ ReLU $\to$ Dropout$(0.5)$ $\to$ $\mathrm{Linear}(128{\to}2)$ & 2 & $128d+514$ \\
+ & Optimisation & Adam, lr $10^{-3}$, cross-entropy & -- & -- \\
+\midrule
+
+\multirow{3}{*}{Optimisation}
+ & Optimiser & Adam with per-group learning rates & -- & -- \\
+ & Learning rates & classical $10^{-4}$, quantum $10^{-2}$, fusion $10^{-3}$, $\gamma$ $10^{-2}$ & -- & -- \\
+ & Schedule & batch 16, 10 epochs, cross-entropy, 5 seeds per configuration & -- & -- \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+
+\begin{table}[t]
+\centering
+\caption{Parameter budget of the assembled fusion models. ``Fusion head'' groups the two
+projection heads, the (parameter-free) \textsc{LayerNorm}, the classifier and $\gamma$.}
+\label{tab:params}
+\footnotesize
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Configuration & Classical & Quantum & Fusion head & Total \\
+\midrule
+SCNN + QC-trainable (TSHF)      &     93{,}378 & 1{,}574 & 117{,}507 &     210{,}889 \\
+ResNet-18 + QC-trainable (TSHF) & 11{,}171{,}266 & 1{,}574 & 166{,}659 & 11{,}337{,}929 \\
+\bottomrule
+\end{tabular}
+\end{table}
